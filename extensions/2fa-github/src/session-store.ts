@@ -13,7 +13,7 @@ import type { PendingVerification, SessionStore, TrustedSession } from "./types.
 const STORE_FILENAME = "2fa-sessions.json";
 
 function getStorePath(): string {
-  return path.join(os.homedir(), ".clawdbot", STORE_FILENAME);
+  return path.join(os.homedir(), ".openclaw", STORE_FILENAME);
 }
 
 function loadStore(): SessionStore {

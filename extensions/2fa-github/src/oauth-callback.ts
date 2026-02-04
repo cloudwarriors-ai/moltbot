@@ -6,7 +6,7 @@
  * 2. /callback?code=xyz&state=xyz - Handles GitHub callback, marks session approved
  */
 
-import type { MoltbotPluginApi } from "clawdbot/plugin-sdk";
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { scheduleShutdown } from "./ngrok-manager.js";
 import { enableTrust } from "./session-store.js";
 
@@ -33,7 +33,7 @@ function generateState(): string {
 }
 
 export function createOAuthRoutes(
-  api: MoltbotPluginApi,
+  api: OpenClawPluginApi,
   config: {
     clientId: string;
     clientSecret: string;

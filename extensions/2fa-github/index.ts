@@ -33,7 +33,7 @@
  * 5. Copy the Client ID (no secret needed for device flow)
  */
 
-import type { MoltbotPluginApi } from "clawdbot/plugin-sdk";
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { twoFactorConfigSchema } from "./src/config.js";
 import { register2FAHook } from "./src/hook.js";
 
@@ -43,7 +43,7 @@ const plugin = {
   description: "Gates sensitive tools behind GitHub Mobile push authentication",
   configSchema: twoFactorConfigSchema,
 
-  register(api: MoltbotPluginApi) {
+  register(api: OpenClawPluginApi) {
     register2FAHook(api);
 
     // Register CLI commands for managing 2FA sessions

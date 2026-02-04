@@ -54,7 +54,7 @@ export type TwoFactorConfig = {
 
 const DEFAULT_SENSITIVE_TOOLS = ["exec", "Bash", "Write", "Edit", "NotebookEdit"];
 const DEFAULT_TTL_MINUTES = 30;
-const DEFAULT_PROTECTED_PATHS = ["src/", "extensions/", "dist/", ".clawdbot/"];
+const DEFAULT_PROTECTED_PATHS = ["src/", "extensions/", "dist/", ".openclaw/"];
 
 export function parseConfig(value: unknown): TwoFactorConfig {
   if (!value || typeof value !== "object") return {};

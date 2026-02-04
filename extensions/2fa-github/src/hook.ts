@@ -14,8 +14,8 @@
  * - "oauth": OAuth callback (tap link, instant if already logged in)
  */
 
-import type { MoltbotPluginApi } from "clawdbot/plugin-sdk";
-import type { AnyAgentTool } from "clawdbot/plugin-sdk";
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import type { AnyAgentTool } from "openclaw/plugin-sdk";
 import { triggerGitHub2FA } from "./browser-auth.js";
 import { parseConfig, isProtectedPath, isAllowedReadPath, type AuthMode } from "./config.js";
 import { requestDeviceCode, quickPollForAccessToken } from "./device-flow.js";
@@ -32,7 +32,7 @@ import {
 } from "./session-store.js";
 
 const DEFAULT_SENSITIVE_TOOLS = ["exec", "Bash", "Write", "Edit", "NotebookEdit"];
-const DEFAULT_PROTECTED_PATHS = ["src/", "extensions/", "dist/", ".clawdbot/"];
+const DEFAULT_PROTECTED_PATHS = ["src/", "extensions/", "dist/", ".openclaw/"];
 
 /**
  * Check if a tool call is modifying a protected path.
@@ -108,7 +108,7 @@ function isGatedRead(
   return true;
 }
 
-export function register2FAHook(api: MoltbotPluginApi): void {
+export function register2FAHook(api: OpenClawPluginApi): void {
   const cfg = parseConfig(api.pluginConfig);
   const authMode: AuthMode = cfg.authMode ?? "device";
   const clientId = cfg.clientId ?? process.env.GITHUB_2FA_CLIENT_ID;
