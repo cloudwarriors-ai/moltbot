@@ -49,6 +49,11 @@ export async function requestDeviceCode(clientId: string): Promise<DeviceCodeRes
     throw new Error("GitHub device code response missing required fields");
   }
 
+  // Construct verification_uri_complete if not provided by GitHub
+  if (!json.verification_uri_complete) {
+    json.verification_uri_complete = `${json.verification_uri}?user_code=${json.user_code}`;
+  }
+
   return json;
 }
 

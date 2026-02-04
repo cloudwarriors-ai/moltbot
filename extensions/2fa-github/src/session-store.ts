@@ -1,39 +1,46 @@
 /**
  * Session Store
  *
- * File-based storage for 2FA sessions and pending verifications.
- * Sessions are keyed by sessionKey and include TTL handling.
+ * File-based storage for 2FA trust and pending verifications.
+ * Trust is persistent (no expiry) until explicitly revoked.
  */
 
 import * as fs from "node:fs";
-import * as path from "node:path";
 import * as os from "node:os";
-
-import type { Session, PendingVerification, SessionStore } from "./types.js";
+import * as path from "node:path";
+import type { PendingVerification, SessionStore, TrustedSession } from "./types.js";
 
 const STORE_FILENAME = "2fa-sessions.json";
 
 function getStorePath(): string {
-  return path.join(os.homedir(), ".openclaw", STORE_FILENAME);
+  return path.join(os.homedir(), ".clawdbot", STORE_FILENAME);
 }
 
 function loadStore(): SessionStore {
   const storePath = getStorePath();
 
   if (!fs.existsSync(storePath)) {
-    return { version: 1, sessions: {}, pending: {} };
+    return { version: 2, pending: {}, trusted: {} };
   }
 
   try {
     const data = JSON.parse(fs.readFileSync(storePath, "utf-8"));
+    // Migrate from v1 format if needed
+    if (data.version === 1) {
+      return {
+        version: 2,
+        pending: data.pending ?? {},
+        trusted: data.trustedChannels ?? {},
+      };
+    }
     return {
-      version: 1,
-      sessions: data.sessions ?? {},
+      version: 2,
       pending: data.pending ?? {},
+      trusted: data.trusted ?? {},
     };
   } catch {
     // Corrupted file, start fresh
-    return { version: 1, sessions: {}, pending: {} };
+    return { version: 2, pending: {}, trusted: {} };
   }
 }
 
@@ -49,63 +56,16 @@ function saveStore(store: SessionStore): void {
 }
 
 /**
- * Prune expired entries from the store.
+ * Prune expired pending verifications.
  */
 function pruneExpired(store: SessionStore): void {
   const now = new Date();
 
-  // Prune expired sessions
-  for (const [key, session] of Object.entries(store.sessions)) {
-    if (new Date(session.expiresAt) < now) {
-      delete store.sessions[key];
-    }
-  }
-
-  // Prune expired pending verifications
   for (const [key, pending] of Object.entries(store.pending)) {
     if (new Date(pending.expiresAt) < now) {
       delete store.pending[key];
     }
   }
-}
-
-/**
- * Get a valid session for the given key.
- * Returns undefined if no valid session exists.
- */
-export function getSession(sessionKey: string): Session | undefined {
-  const store = loadStore();
-  const session = store.sessions[sessionKey];
-
-  if (!session) return undefined;
-
-  // Check if expired
-  if (new Date(session.expiresAt) < new Date()) {
-    delete store.sessions[sessionKey];
-    saveStore(store);
-    return undefined;
-  }
-
-  return session;
-}
-
-/**
- * Set a session for the given key.
- * Also clears any pending verification for this key.
- */
-export function setSession(sessionKey: string, session: Session): void {
-  const store = loadStore();
-
-  // Store the new session
-  store.sessions[sessionKey] = session;
-
-  // Clear pending verification on successful auth
-  delete store.pending[sessionKey];
-
-  // Prune expired entries
-  pruneExpired(store);
-
-  saveStore(store);
 }
 
 /**
@@ -150,24 +110,107 @@ export function clearPending(sessionKey: string): void {
   }
 }
 
+// ============================================================================
+// Trust Management (unified for all sessions)
+// ============================================================================
+
 /**
- * Clear all sessions and pending verifications.
- * Useful for testing or manual reset.
+ * Check if a session has trust enabled.
+ * Trust is persistent (no expiry) until explicitly revoked.
+ */
+export function isTrusted(sessionKey: string): TrustedSession | undefined {
+  const store = loadStore();
+  return store.trusted?.[sessionKey];
+}
+
+/**
+ * Enable trust for a session.
+ * Called after successful 2FA verification.
+ */
+export function enableTrust(sessionKey: string, params: { githubLogin: string }): void {
+  const store = loadStore();
+  if (!store.trusted) {
+    store.trusted = {};
+  }
+
+  store.trusted[sessionKey] = {
+    sessionKey,
+    githubLogin: params.githubLogin,
+    enabledAt: new Date().toISOString(),
+  };
+
+  // Clear any pending verification
+  delete store.pending[sessionKey];
+
+  saveStore(store);
+}
+
+/**
+ * Revoke trust for a session.
+ * Called when user says "disable trust".
+ */
+export function revokeTrust(sessionKey: string): boolean {
+  const store = loadStore();
+  if (!store.trusted?.[sessionKey]) {
+    return false; // Nothing to revoke
+  }
+
+  delete store.trusted[sessionKey];
+  saveStore(store);
+  return true;
+}
+
+/**
+ * Revoke all trust (useful for security reset).
+ */
+export function revokeAllTrust(): number {
+  const store = loadStore();
+  const count = Object.keys(store.trusted ?? {}).length;
+  store.trusted = {};
+  saveStore(store);
+  return count;
+}
+
+/**
+ * List all trusted sessions.
+ */
+export function listTrustedSessions(): TrustedSession[] {
+  const store = loadStore();
+  return Object.values(store.trusted ?? {});
+}
+
+/**
+ * Clear all data (for testing).
  */
 export function clearAll(): void {
-  const store = { version: 1 as const, sessions: {}, pending: {} };
+  const store: SessionStore = { version: 2, pending: {}, trusted: {} };
   saveStore(store);
+}
+
+// Browser auth pending state (in-memory only, not persisted)
+const browserAuthPending = new Map<string, { startedAt: number }>();
+
+export function setBrowserAuthPending(sessionKey: string): void {
+  browserAuthPending.set(sessionKey, { startedAt: Date.now() });
+}
+
+export function getBrowserAuthPending(sessionKey: string): { startedAt: number } | undefined {
+  return browserAuthPending.get(sessionKey);
+}
+
+export function clearBrowserAuthPending(sessionKey: string): void {
+  browserAuthPending.delete(sessionKey);
 }
 
 /**
  * Get statistics about the store.
  */
-export function getStats(): { sessionCount: number; pendingCount: number } {
+export function getStats(): { pendingCount: number; trustedCount: number } {
   const store = loadStore();
   pruneExpired(store);
 
   return {
-    sessionCount: Object.keys(store.sessions).length,
     pendingCount: Object.keys(store.pending).length,
+    trustedCount: Object.keys(store.trusted ?? {}).length,
   };
 }

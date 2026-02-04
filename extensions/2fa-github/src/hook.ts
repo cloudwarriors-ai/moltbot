@@ -1,210 +1,465 @@
 /**
  * 2FA Hook Handler
  *
- * Registers a before_tool_call hook that gates sensitive tools behind
- * GitHub Mobile push authentication using the Device Authorization Flow.
+ * Unified trust model - all sessions work the same way:
  *
- * Flow (non-blocking):
- * 1. Tool call triggers hook
- * 2. Check for valid session -> allow if valid
- * 3. Check for pending verification -> quick poll, if approved store session and allow
- * 4. No session/pending -> initiate device flow, store pending, return block with instructions
- * 5. User approves on phone, retries request -> step 3 succeeds
+ * 1. First sensitive tool call → 2FA prompt
+ * 2. After approval → session is trusted (persistent, no expiry)
+ * 3. "disable trust" → clears trust, next sensitive call requires 2FA
+ * 4. Protected operations (code modification) ALWAYS require fresh 2FA
+ *
+ * Auth Modes:
+ * - "device": GitHub device flow (shows code, user enters manually)
+ * - "browser": Playwright login (triggers GitHub Mobile push)
+ * - "oauth": OAuth callback (tap link, instant if already logged in)
  */
 
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import type { MoltbotPluginApi } from "clawdbot/plugin-sdk";
+import type { AnyAgentTool } from "clawdbot/plugin-sdk";
+import { triggerGitHub2FA } from "./browser-auth.js";
+import { parseConfig, isProtectedPath, isAllowedReadPath, type AuthMode } from "./config.js";
 import { requestDeviceCode, quickPollForAccessToken } from "./device-flow.js";
+import { startNgrok, isNgrokRunning } from "./ngrok-manager.js";
+import { createOAuthRoutes, generateApprovalUrl } from "./oauth-callback.js";
 import {
-  getSession,
-  setSession,
   getPending,
   setPending,
   clearPending,
+  isTrusted,
+  enableTrust,
+  revokeTrust,
+  listTrustedSessions,
 } from "./session-store.js";
-import { parseConfig, type TwoFactorConfig } from "./config.js";
 
 const DEFAULT_SENSITIVE_TOOLS = ["exec", "Bash", "Write", "Edit", "NotebookEdit"];
+const DEFAULT_PROTECTED_PATHS = ["src/", "extensions/", "dist/", ".clawdbot/"];
 
 /**
- * Check if a file path matches any allowed path prefix.
- * Normalizes paths and handles trailing slashes.
+ * Check if a tool call is modifying a protected path.
  */
-function isPathAllowed(filePath: string | undefined, allowPaths: string[] | undefined): boolean {
-  if (!filePath || !allowPaths || allowPaths.length === 0) return false;
-  
-  // Normalize the file path (resolve . and .., but we can't use path module here easily)
-  const normalizedFile = filePath.replace(/\/+/g, "/").replace(/\/$/, "");
-  
-  for (const allowed of allowPaths) {
-    const normalizedAllowed = allowed.replace(/\/+/g, "/").replace(/\/$/, "");
-    // Check prefix match (must match full directory component)
-    if (
-      normalizedFile === normalizedAllowed ||
-      normalizedFile.startsWith(normalizedAllowed + "/")
-    ) {
+function isProtectedOperation(
+  toolName: string,
+  params: Record<string, unknown>,
+  protectedPaths: string[],
+): boolean {
+  if (["Write", "Edit", "NotebookEdit", "write", "edit"].includes(toolName)) {
+    const filePath =
+      (params.file_path as string) ||
+      (params.filePath as string) ||
+      (params.path as string) ||
+      (params.notebook_path as string) ||
+      "";
+    if (filePath && isProtectedPath(filePath, protectedPaths)) {
       return true;
     }
   }
+
+  if (["Bash", "exec"].includes(toolName)) {
+    const command = (params.command as string) || "";
+    for (const protectedPath of protectedPaths) {
+      if (command.includes(protectedPath)) {
+        const modifyPatterns = [
+          /\b(rm|mv|cp|cat\s*>|echo\s*>|sed\s+-i|chmod|chown)\b/,
+          />\s*\S/,
+          />>/,
+        ];
+        if (modifyPatterns.some((p) => p.test(command))) {
+          return true;
+        }
+      }
+    }
+  }
+
   return false;
 }
 
 /**
- * Extract file path from tool parameters.
- * Handles various parameter naming conventions.
+ * Check if a read operation should be gated based on allowedReadPaths.
+ * Returns true if the read should be blocked (path not in whitelist).
  */
-function extractFilePath(params: Record<string, unknown> | undefined): string | undefined {
-  if (!params) return undefined;
-  // Common parameter names for file paths
-  const pathKeys = ["path", "file_path", "filePath", "file"];
-  for (const key of pathKeys) {
-    const val = params[key];
-    if (typeof val === "string") return val;
+function isGatedRead(
+  toolName: string,
+  params: Record<string, unknown>,
+  allowedReadPaths: string[] | undefined,
+): boolean {
+  // Only check read tool
+  if (!["read", "Read"].includes(toolName)) {
+    return false;
   }
-  return undefined;
+
+  // If no allowedReadPaths configured, read is ungated (legacy behavior)
+  if (!allowedReadPaths || allowedReadPaths.length === 0) {
+    return false;
+  }
+
+  const filePath =
+    (params.file_path as string) || (params.filePath as string) || (params.path as string) || "";
+
+  if (!filePath) {
+    return false;
+  }
+
+  // If path matches allowed list, don't gate
+  if (isAllowedReadPath(filePath, allowedReadPaths)) {
+    return false;
+  }
+
+  // Path not in whitelist, should be gated
+  return true;
 }
 
-export function register2FAHook(api: OpenClawPluginApi): void {
+export function register2FAHook(api: MoltbotPluginApi): void {
   const cfg = parseConfig(api.pluginConfig);
+  const authMode: AuthMode = cfg.authMode ?? "device";
   const clientId = cfg.clientId ?? process.env.GITHUB_2FA_CLIENT_ID;
-  const ttlMinutes = cfg.tokenTtlMinutes ?? 30;
+  const clientSecret = cfg.clientSecret ?? process.env.GITHUB_2FA_CLIENT_SECRET;
+  const baseUrl = cfg.baseUrl ?? process.env.GITHUB_2FA_BASE_URL;
+  const ngrokAuthToken = cfg.ngrokAuthToken ?? process.env.NGROK_AUTH_TOKEN;
+  const ngrokDomain = cfg.ngrokDomain ?? process.env.NGROK_DOMAIN;
+  const gatewayPort = 18789; // Default gateway port
+  const githubUsername = cfg.githubUsername ?? process.env.GITHUB_USERNAME;
+  const githubPassword = cfg.githubPassword ?? process.env.GITHUB_PASSWORD;
+  const headless = cfg.headless ?? true;
   const sensitiveTools = cfg.sensitiveTools ?? DEFAULT_SENSITIVE_TOOLS;
   const gateAllTools = cfg.gateAllTools ?? false;
-  const readAllowPaths = cfg.readAllowPaths;
-  const writeAllowPaths = cfg.writeAllowPaths;
+  const protectedPaths = cfg.protectedPaths ?? DEFAULT_PROTECTED_PATHS;
+  const allowedReadPaths = cfg.allowedReadPaths;
 
-  if (!clientId) {
-    api.logger.warn("2fa-github: No clientId configured, plugin disabled");
+  // Validate config based on mode
+  if (authMode === "device" && !clientId) {
+    api.logger.warn("2fa-github: No clientId configured for device mode, plugin disabled");
+    return;
+  }
+  if (authMode === "browser" && (!githubUsername || !githubPassword)) {
     api.logger.warn(
-      "2fa-github: Set plugins.entries.2fa-github.config.clientId in config or GITHUB_2FA_CLIENT_ID env var",
+      "2fa-github: No GitHub credentials configured for browser mode, plugin disabled",
+    );
+    return;
+  }
+  if (authMode === "oauth" && (!clientId || !clientSecret || !baseUrl)) {
+    api.logger.warn(
+      "2fa-github: Missing clientId, clientSecret, or baseUrl for oauth mode, plugin disabled",
     );
     return;
   }
 
-  api.on("before_tool_call", async (event, ctx) => {
-    const toolName = event.toolName;
-    
-    // Check if this tool requires 2FA
-    if (!gateAllTools && !sensitiveTools.includes(toolName)) {
-      return; // Allow without 2FA
-    }
+  // Set up OAuth routes if in oauth mode
+  const oauthCallbackUrl = authMode === "oauth" ? `${baseUrl}/webhook/2fa-github/callback` : "";
+  const oauthStartUrl = authMode === "oauth" ? `${baseUrl}/webhook/2fa-github` : "";
 
-    // Path-based allowlisting for read/write/edit tools
-    const params = event.parameters as Record<string, unknown> | undefined;
-    const filePath = extractFilePath(params);
-    
-    if (toolName === "read" && isPathAllowed(filePath, readAllowPaths)) {
-      api.logger.debug?.(`2fa-github: Allowing read of ${filePath} (in allowlist)`);
-      return; // Allow without 2FA - path is in allowlist
-    }
-    
-    if ((toolName === "write" || toolName === "edit") && isPathAllowed(filePath, writeAllowPaths)) {
-      api.logger.debug?.(`2fa-github: Allowing ${toolName} of ${filePath} (in allowlist)`);
-      return; // Allow without 2FA - path is in allowlist
-    }
+  if (authMode === "oauth") {
+    createOAuthRoutes(api, {
+      clientId: clientId!,
+      clientSecret: clientSecret!,
+      callbackUrl: oauthCallbackUrl,
+    });
+  }
 
-    const sessionKey = ctx.sessionKey ?? "default";
+  // ============================================================================
+  // AUTH HELPERS
+  // ============================================================================
 
-    // Check for valid session first
-    const session = getSession(sessionKey);
-    if (session) {
-      api.logger.debug?.(`2fa-github: Valid session for ${session.githubLogin}`);
-      return; // Allow - valid session exists
-    }
+  async function doBrowserAuth(): Promise<
+    { success: true; username: string } | { success: false; error: string }
+  > {
+    api.logger.info?.("2fa-github: Triggering browser auth, check GitHub Mobile...");
+    return triggerGitHub2FA({
+      username: githubUsername!,
+      password: githubPassword!,
+      headless,
+      timeout: 120_000,
+    });
+  }
 
-    // Check for pending verification (user might be retrying after approval)
+  async function doDeviceAuth(
+    sessionKey: string,
+  ): Promise<{ approved: true; username: string } | { approved: false; blockReason: string }> {
     const pending = getPending(sessionKey);
     if (pending) {
-      api.logger.info?.("2fa-github: Found pending verification, checking...");
+      const result = await quickPollForAccessToken({
+        clientId: clientId!,
+        deviceCode: pending.deviceCode,
+      });
 
-      try {
-        const result = await quickPollForAccessToken({
-          clientId,
-          deviceCode: pending.deviceCode,
-        });
+      if (result === "pending") {
+        return {
+          approved: false,
+          blockReason: [
+            "🔐 2FA approval pending.",
+            "",
+            `Code: ${pending.userCode}`,
+            "",
+            "Check GitHub Mobile, or enter code at github.com/login/device",
+          ].join("\n"),
+        };
+      }
 
-        if (result === "pending") {
-          // Still pending - remind user to approve
-          return {
-            block: true,
-            blockReason: [
-              "2FA approval still pending.",
-              "",
-              `Visit: ${pending.verificationUri}`,
-              `Code: ${pending.userCode}`,
-              "",
-              "Approve on GitHub Mobile (or enter code on website), then retry your request.",
-            ].join("\n"),
-          };
-        }
-
-        if (result === "expired") {
-          clearPending(sessionKey);
-          // Fall through to create new verification
-        } else if (result === "denied") {
-          clearPending(sessionKey);
-          return {
-            block: true,
-            blockReason: "2FA authorization was denied. Please try again.",
-          };
-        } else {
-          // Success! Store session and allow
-          const now = new Date();
-          const expiry = new Date(now.getTime() + ttlMinutes * 60 * 1000);
-          setSession(sessionKey, {
-            githubLogin: result.login,
-            verifiedAt: now.toISOString(),
-            expiresAt: expiry.toISOString(),
-          });
-          api.logger.info?.(`2fa-github: Verified as ${result.login}`);
-          return; // Allow execution
-        }
-      } catch (err) {
-        api.logger.warn?.(`2fa-github: Poll error: ${String(err)}`);
+      if (result === "expired" || result === "denied") {
         clearPending(sessionKey);
-        // Fall through to create new verification
+      } else {
+        clearPending(sessionKey);
+        return { approved: true, username: result.login };
       }
     }
 
-    // No session, no valid pending - initiate new device flow
-    api.logger.info?.("2fa-github: Initiating GitHub device flow");
+    const device = await requestDeviceCode(clientId!);
+    const expiresAt = new Date(Date.now() + device.expires_in * 1000);
+    setPending(sessionKey, {
+      deviceCode: device.device_code,
+      userCode: device.user_code,
+      verificationUri: device.verification_uri,
+      verificationUriComplete: device.verification_uri_complete,
+      expiresAt: expiresAt.toISOString(),
+      intervalMs: Math.max(1000, device.interval * 1000),
+    });
 
-    try {
-      const device = await requestDeviceCode(clientId);
+    return {
+      approved: false,
+      blockReason: [
+        "🔐 2FA required.",
+        "",
+        `Code: ${device.user_code}`,
+        "",
+        "Check GitHub Mobile, or enter code at github.com/login/device",
+      ].join("\n"),
+    };
+  }
 
-      // Store pending verification for retry
-      const expiresAt = new Date(Date.now() + device.expires_in * 1000);
-      setPending(sessionKey, {
-        deviceCode: device.device_code,
-        userCode: device.user_code,
-        verificationUri: device.verification_uri,
-        expiresAt: expiresAt.toISOString(),
-        intervalMs: Math.max(1000, device.interval * 1000),
+  async function getOAuthBlockReason(sessionKey: string): Promise<string> {
+    // Auto-start ngrok if configured
+    if (ngrokAuthToken && ngrokDomain && !isNgrokRunning()) {
+      api.logger.info?.("2fa-github: Starting ngrok tunnel for OAuth...");
+      const result = await startNgrok({
+        authToken: ngrokAuthToken,
+        domain: ngrokDomain,
+        port: gatewayPort,
       });
+      if ("error" in result) {
+        api.logger.error?.(`2fa-github: Failed to start ngrok: ${result.error}`);
+        return `🔐 OAuth failed: ${result.error}`;
+      }
+      api.logger.info?.(`2fa-github: ngrok tunnel ready at ${result.url}`);
+    }
 
-      // Return block with instructions (non-blocking - returns immediately)
-      return {
-        block: true,
-        blockReason: [
-          "2FA verification required for this operation.",
-          "",
-          `Visit: ${device.verification_uri}`,
-          `Code: ${device.user_code}`,
-          "",
-          "Approve on GitHub Mobile (or enter code on website), then retry your request.",
-        ].join("\n"),
-      };
-    } catch (err) {
-      api.logger.error?.(`2fa-github: Failed to initiate device flow: ${String(err)}`);
-      return {
-        block: true,
-        blockReason: `2FA verification failed: ${String(err)}`,
-      };
+    const approvalUrl = generateApprovalUrl(oauthStartUrl, sessionKey);
+    return ["🔐 Tap to approve:", "", approvalUrl].join("\n");
+  }
+
+  // ============================================================================
+  // MAIN HOOK
+  // ============================================================================
+  api.on("before_tool_call", async (event, ctx) => {
+    const toolName = event.toolName;
+    const params = event.params as Record<string, unknown>;
+    const sessionKey = ctx.sessionKey ?? "default";
+
+    api.logger.info?.(`2fa-github: before_tool_call hook fired for tool: ${toolName}`);
+
+    // ========================================================================
+    // CHECK FOR GATED READ OPERATIONS
+    // ========================================================================
+    const gatedRead = isGatedRead(toolName, params, allowedReadPaths);
+    api.logger.info?.(`2fa-github: isGatedRead result for ${toolName}: ${gatedRead}`);
+    if (gatedRead) {
+      api.logger.info?.(`2fa-github: Gated read operation (path not in whitelist)`);
+
+      // Check if session is trusted
+      const existingTrust = isTrusted(sessionKey);
+      if (existingTrust) {
+        api.logger.debug?.(`2fa-github: Trusted session ${sessionKey}, allowing read`);
+        return;
+      }
+
+      // Require 2FA for non-whitelisted read
+      if (authMode === "browser") {
+        const result = await doBrowserAuth();
+        if (result.success) {
+          enableTrust(sessionKey, { githubLogin: result.username });
+          api.logger.info?.(`2fa-github: Trust enabled for ${sessionKey} by ${result.username}`);
+          return;
+        }
+        return { block: true, blockReason: `🔐 Auth failed: ${result.error}` };
+      } else if (authMode === "oauth") {
+        return { block: true, blockReason: await getOAuthBlockReason(sessionKey) };
+      } else {
+        try {
+          const result = await doDeviceAuth(sessionKey);
+          if (result.approved) {
+            enableTrust(sessionKey, { githubLogin: result.username });
+            api.logger.info?.(`2fa-github: Trust enabled for ${sessionKey} by ${result.username}`);
+            return;
+          }
+          return { block: true, blockReason: result.blockReason };
+        } catch (err) {
+          return { block: true, blockReason: `🔐 Auth failed: ${String(err)}` };
+        }
+      }
+    }
+
+    // ========================================================================
+    // CHECK IF TOOL REQUIRES GATE
+    // ========================================================================
+    const requiresGate = gateAllTools || sensitiveTools.includes(toolName);
+    if (!requiresGate) {
+      return;
+    }
+
+    // ========================================================================
+    // PROTECTED OPERATIONS: Always require fresh 2FA
+    // ========================================================================
+    const isProtected = isProtectedOperation(toolName, params, protectedPaths);
+
+    if (isProtected) {
+      api.logger.info?.(`2fa-github: Protected operation detected (${toolName})`);
+      const protectedSessionKey = sessionKey + ":protected:" + Date.now();
+
+      if (authMode === "browser") {
+        const result = await doBrowserAuth();
+        if (result.success) {
+          api.logger.info?.(`2fa-github: Protected op approved by ${result.username}`);
+          return;
+        }
+        return { block: true, blockReason: `🔐 Auth failed: ${result.error}` };
+      } else if (authMode === "oauth") {
+        // OAuth mode: return link, check on retry
+        const existingTrust = isTrusted(protectedSessionKey);
+        if (existingTrust) {
+          revokeTrust(protectedSessionKey); // One-time use for protected ops
+          api.logger.info?.(`2fa-github: Protected op approved by ${existingTrust.githubLogin}`);
+          return;
+        }
+        return { block: true, blockReason: await getOAuthBlockReason(protectedSessionKey) };
+      } else {
+        try {
+          const result = await doDeviceAuth(protectedSessionKey);
+          if (result.approved) {
+            api.logger.info?.(`2fa-github: Protected op approved by ${result.username}`);
+            return;
+          }
+          return { block: true, blockReason: result.blockReason };
+        } catch (err) {
+          return { block: true, blockReason: `🔐 Auth failed: ${String(err)}` };
+        }
+      }
+    }
+
+    // ========================================================================
+    // CHECK TRUST
+    // ========================================================================
+    const existingTrust = isTrusted(sessionKey);
+
+    if (existingTrust) {
+      api.logger.debug?.(
+        `2fa-github: Trusted session ${sessionKey} (by ${existingTrust.githubLogin})`,
+      );
+      return;
+    }
+
+    // ========================================================================
+    // 2FA FLOW
+    // ========================================================================
+
+    if (authMode === "browser") {
+      const result = await doBrowserAuth();
+      if (result.success) {
+        enableTrust(sessionKey, { githubLogin: result.username });
+        api.logger.info?.(`2fa-github: Trust enabled for ${sessionKey} by ${result.username}`);
+        return;
+      }
+      return { block: true, blockReason: `🔐 Auth failed: ${result.error}` };
+    } else if (authMode === "oauth") {
+      // OAuth mode: return link, trust is enabled via callback
+      return { block: true, blockReason: await getOAuthBlockReason(sessionKey) };
+    } else {
+      try {
+        const result = await doDeviceAuth(sessionKey);
+        if (result.approved) {
+          enableTrust(sessionKey, { githubLogin: result.username });
+          api.logger.info?.(`2fa-github: Trust enabled for ${sessionKey} by ${result.username}`);
+          return;
+        }
+        return { block: true, blockReason: result.blockReason };
+      } catch (err) {
+        return { block: true, blockReason: `🔐 Auth failed: ${String(err)}` };
+      }
     }
   });
 
-  const readPaths = readAllowPaths?.length ? readAllowPaths.join(", ") : "none";
-  const writePaths = writeAllowPaths?.length ? writeAllowPaths.join(", ") : "none";
+  // ============================================================================
+  // TRUST MANAGEMENT TOOL
+  // ============================================================================
+  api.registerTool({
+    name: "manage_2fa_trust",
+    description: `Manage 2FA trust settings. Use when user wants to check status, disable trust, or list trusted sessions.`,
+    parameters: {
+      type: "object",
+      properties: {
+        action: {
+          type: "string",
+          enum: ["status", "disable", "list"],
+          description: "The action to perform",
+        },
+      },
+      required: ["action"],
+    },
+    execute: async (_toolCallId, params) => {
+      const action = (params as { action: string }).action;
+
+      if (action === "list" || action === "status") {
+        const trusted = listTrustedSessions();
+        if (trusted.length === 0) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: "No sessions have trust enabled.\nNext sensitive operation will require 2FA.",
+              },
+            ],
+          };
+        }
+        const list = trusted.map((t) => `- ${t.sessionKey} (${t.githubLogin})`).join("\n");
+        return {
+          content: [
+            { type: "text", text: `Trust ENABLED for:\n${list}\n\nSay "disable trust" to revoke.` },
+          ],
+        };
+      }
+
+      if (action === "disable") {
+        const trusted = listTrustedSessions();
+        if (trusted.length === 0) {
+          return { content: [{ type: "text", text: "No trust to disable." }] };
+        }
+        let count = 0;
+        for (const t of trusted) {
+          if (revokeTrust(t.sessionKey)) count++;
+        }
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Trust DISABLED for ${count} session(s). Next sensitive op requires 2FA.`,
+            },
+          ],
+        };
+      }
+
+      return { content: [{ type: "text", text: `Unknown action: ${action}` }] };
+    },
+  } as AnyAgentTool);
+
+  // Log configuration
+  const modeDesc = {
+    device: "device (code entry)",
+    browser: "browser (GitHub Mobile push)",
+    oauth: "oauth (tap link)",
+  }[authMode];
+
+  const readGateStatus = allowedReadPaths
+    ? `read gated (${allowedReadPaths.length} allowed paths)`
+    : "read ungated";
+
   api.logger.info?.(
-    `2fa-github: Enabled (TTL: ${ttlMinutes}min, tools: ${sensitiveTools.join(", ")}, readAllow: ${readPaths}, writeAllow: ${writePaths})`,
+    `2fa-github: Enabled (mode: ${modeDesc}, tools: ${sensitiveTools.join(", ")}, ${readGateStatus})`,
   );
 }

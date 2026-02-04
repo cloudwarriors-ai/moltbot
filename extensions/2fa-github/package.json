@@ -1,14 +1,14 @@
 {
-  "name": "@openclaw/2fa-github",
+  "name": "@moltbot/2fa-github",
   "version": "0.1.0",
-  "type": "module",
   "description": "GitHub Mobile 2FA gate for sensitive tool calls",
-  "openclaw": {
+  "type": "module",
+  "devDependencies": {
+    "moltbot": "workspace:*"
+  },
+  "moltbot": {
     "extensions": [
       "./index.ts"
     ]
-  },
-  "devDependencies": {
-    "openclaw": "workspace:*"
   }
 }
