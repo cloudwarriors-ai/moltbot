@@ -1,17 +1,51 @@
 {
   "id": "2fa-github",
   "name": "GitHub Mobile 2FA Gate",
-  "description": "Gates sensitive tools behind GitHub Mobile push authentication",
+  "description": "Gates sensitive tools behind GitHub Mobile push authentication with trust model",
   "uiHints": {
+    "authMode": {
+      "label": "Auth Mode",
+      "help": "device = show code to enter, browser = Playwright login (GitHub Mobile push), oauth = tap link"
+    },
     "clientId": {
       "label": "GitHub OAuth App Client ID",
       "placeholder": "Ov23xxxxxxxxxxxxxxxxxx",
       "help": "Create at GitHub Settings > Developer Settings > OAuth Apps (enable Device Flow)"
     },
+    "clientSecret": {
+      "label": "GitHub OAuth App Client Secret",
+      "help": "Required for oauth mode only"
+    },
+    "baseUrl": {
+      "label": "OAuth Base URL",
+      "placeholder": "https://your-domain.ngrok.app",
+      "help": "Public URL for OAuth callbacks (oauth mode only)"
+    },
+    "ngrokAuthToken": {
+      "label": "ngrok Auth Token",
+      "help": "ngrok auth token for auto-starting tunnel during OAuth"
+    },
+    "ngrokDomain": {
+      "label": "ngrok Domain",
+      "placeholder": "your-domain.ngrok.app",
+      "help": "Your ngrok custom domain (without https://)"
+    },
+    "githubUsername": {
+      "label": "GitHub Username",
+      "help": "For browser auth mode (can also use GITHUB_USERNAME env var)"
+    },
+    "githubPassword": {
+      "label": "GitHub Password",
+      "help": "For browser auth mode (can also use GITHUB_PASSWORD env var)"
+    },
+    "headless": {
+      "label": "Headless Browser",
+      "help": "Run browser in headless mode for browser auth (default: true)"
+    },
     "tokenTtlMinutes": {
       "label": "Session TTL (minutes)",
       "placeholder": "30",
-      "help": "How long before re-authentication is required"
+      "help": "How long before re-authentication is required (for non-trusted channels)"
     },
     "sensitiveTools": {
       "label": "Sensitive Tools",
@@ -20,14 +54,59 @@
     "gateAllTools": {
       "label": "Gate All Tools",
       "help": "Require 2FA for all tools, not just sensitive ones"
+    },
+    "trustedChannels": {
+      "label": "Trusted Channels",
+      "help": "Channels eligible for persistent trust (e.g., 'whatsapp:self'). Requires initial 2FA to enable."
+    },
+    "protectedPaths": {
+      "label": "Protected Paths",
+      "help": "File paths that ALWAYS require fresh 2FA, even with trust enabled. Prevents circumvention."
+    },
+    "allowedReadPaths": {
+      "label": "Allowed Read Paths",
+      "help": "Paths whitelisted for read without 2FA (supports * wildcards). If set, reads outside these paths require approval."
     }
   },
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
     "properties": {
+      "authMode": {
+        "type": "string",
+        "enum": ["device", "browser", "oauth"],
+        "description": "Auth mode: device (code entry), browser (Playwright), oauth (tap link)"
+      },
       "clientId": {
         "type": "string"
+      },
+      "clientSecret": {
+        "type": "string",
+        "description": "GitHub OAuth App client secret (for oauth mode)"
+      },
+      "baseUrl": {
+        "type": "string",
+        "description": "Public URL for OAuth callbacks (e.g., https://moltbot-doug.ngrok.app)"
+      },
+      "ngrokAuthToken": {
+        "type": "string",
+        "description": "ngrok auth token for auto-starting tunnel"
+      },
+      "ngrokDomain": {
+        "type": "string",
+        "description": "ngrok custom domain (e.g., moltbot-doug.ngrok.app)"
+      },
+      "githubUsername": {
+        "type": "string",
+        "description": "GitHub username for browser auth mode"
+      },
+      "githubPassword": {
+        "type": "string",
+        "description": "GitHub password for browser auth mode"
+      },
+      "headless": {
+        "type": "boolean",
+        "description": "Run browser in headless mode (default: true)"
       },
       "tokenTtlMinutes": {
         "type": "number"
@@ -40,6 +119,27 @@
       },
       "gateAllTools": {
         "type": "boolean"
+      },
+      "trustedChannels": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Channels eligible for persistent trust mode (e.g., 'whatsapp:self')"
+      },
+      "protectedPaths": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "File paths that always require fresh 2FA (default: src/, extensions/, dist/)"
+      },
+      "allowedReadPaths": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Paths whitelisted for read without 2FA. Supports * wildcards. If set, reads outside require approval."
       }
     }
   }
