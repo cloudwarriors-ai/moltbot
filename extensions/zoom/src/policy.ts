@@ -144,6 +144,20 @@ export function resolveZoomReplyPolicy(params: {
   return { requireMention };
 }
 
+export type ZoomObservePolicy = {
+  observeMode: boolean;
+  reviewChannelJid?: string;
+};
+
+export function resolveZoomObservePolicy(params: {
+  channelConfig?: ZoomChannelConfig;
+}): ZoomObservePolicy {
+  return {
+    observeMode: params.channelConfig?.observeMode ?? false,
+    reviewChannelJid: params.channelConfig?.reviewChannelJid,
+  };
+}
+
 export function isZoomGroupAllowed(params: {
   groupPolicy: GroupPolicy;
   allowFrom: Array<string | number>;

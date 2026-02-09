@@ -2,6 +2,8 @@ import type { DmPolicy, GroupPolicy } from "openclaw/plugin-sdk";
 
 export type ZoomChannelConfig = {
   requireMention?: boolean;
+  observeMode?: boolean;
+  reviewChannelJid?: string;
   tools?: {
     allow?: string[];
     deny?: string[];
@@ -38,6 +40,8 @@ export type ZoomConfig = {
   dmHistoryLimit?: number;
   channels?: Record<string, ZoomChannelConfig | undefined>;
   dms?: Record<string, unknown>;
+  /** Public base URL for upload links, e.g. "https://molty-dev.cloudwarriors.ai" */
+  publicUrl?: string;
 };
 
 export type ZoomCredentials = {
@@ -81,9 +85,28 @@ export type ZoomWebhookEvent = {
       text?: string;
       cmd?: string;
       timestamp?: number;
+      /** Button/action click payloads */
+      actionItem?: { text?: string; value?: string };
+      fieldEditItem?: { key?: string; value?: string; newValue?: string };
+      selectedItem?: { value?: string; text?: string };
+      toJid?: string;
+      messageId?: string;
+      original?: { body?: Array<Record<string, unknown>> };
+      userName?: string;
+      channelName?: string;
     };
   };
 };
+
+export type ZoomActionButton = {
+  text: string;
+  value: string;
+  style?: "Primary" | "Danger" | "Default" | "Disabled";
+};
+
+export type ZoomBodyItem =
+  | { type: "message"; text: string }
+  | { type: "actions"; items: ZoomActionButton[] };
 
 export type ZoomAccessToken = {
   accessToken: string;
