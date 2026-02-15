@@ -315,46 +315,7 @@ export function register2FAHook(api: OpenClawPluginApi): void {
     }
 
     // ========================================================================
-    // PROTECTED OPERATIONS: Always require fresh 2FA
-    // ========================================================================
-    const isProtected = isProtectedOperation(toolName, params, protectedPaths);
-
-    if (isProtected) {
-      api.logger.info?.(`2fa-github: Protected operation detected (${toolName})`);
-      const protectedSessionKey = sessionKey + ":protected:" + Date.now();
-
-      if (authMode === "browser") {
-        const result = await doBrowserAuth();
-        if (result.success) {
-          api.logger.info?.(`2fa-github: Protected op approved by ${result.username}`);
-          return;
-        }
-        return { block: true, blockReason: `🔐 Auth failed: ${result.error}` };
-      } else if (authMode === "oauth") {
-        // OAuth mode: return link, check on retry
-        const existingTrust = isTrusted(protectedSessionKey);
-        if (existingTrust) {
-          revokeTrust(protectedSessionKey); // One-time use for protected ops
-          api.logger.info?.(`2fa-github: Protected op approved by ${existingTrust.githubLogin}`);
-          return;
-        }
-        return { block: true, blockReason: await getOAuthBlockReason(protectedSessionKey) };
-      } else {
-        try {
-          const result = await doDeviceAuth(protectedSessionKey);
-          if (result.approved) {
-            api.logger.info?.(`2fa-github: Protected op approved by ${result.username}`);
-            return;
-          }
-          return { block: true, blockReason: result.blockReason };
-        } catch (err) {
-          return { block: true, blockReason: `🔐 Auth failed: ${String(err)}` };
-        }
-      }
-    }
-
-    // ========================================================================
-    // CHECK TRUST
+    // CHECK SESSION TRUST (one approval per session, tied to GitHub user)
     // ========================================================================
     const existingTrust = isTrusted(sessionKey);
 

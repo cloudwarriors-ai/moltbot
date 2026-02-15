@@ -19,6 +19,7 @@ export type TrustedSession = {
   sessionKey: string;
   githubLogin: string;
   enabledAt: string;
+  approvedAt?: number; // epoch ms — used for time-windowed protected trust
 };
 
 export type SessionStore = {

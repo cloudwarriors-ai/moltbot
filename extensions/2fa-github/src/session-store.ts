@@ -137,6 +137,7 @@ export function enableTrust(sessionKey: string, params: { githubLogin: string })
     sessionKey,
     githubLogin: params.githubLogin,
     enabledAt: new Date().toISOString(),
+    approvedAt: Date.now(),
   };
 
   // Clear any pending verification
