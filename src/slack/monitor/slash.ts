@@ -2,7 +2,6 @@ import type { SlackActionMiddlewareArgs, SlackCommandMiddlewareArgs } from "@sla
 import type { ChatCommandDefinition, CommandArgs } from "../../auto-reply/commands-registry.js";
 import type { ResolvedSlackAccount } from "../accounts.js";
 import type { SlackMonitorContext } from "./context.js";
-import { resolveEffectiveMessagesConfig } from "../../agents/identity.js";
 import { resolveChunkMode } from "../../auto-reply/chunk.js";
 import {
   buildCommandTextFromArgs,
@@ -17,6 +16,7 @@ import { listSkillCommandsForAgents } from "../../auto-reply/skill-commands.js";
 import { formatAllowlistMatchMeta } from "../../channels/allowlist-match.js";
 import { resolveCommandAuthorizedFromAuthorizers } from "../../channels/command-gating.js";
 import { resolveConversationLabel } from "../../channels/conversation-label.js";
+import { createReplyPrefixOptions } from "../../channels/reply-prefix.js";
 import { resolveNativeCommandsEnabled, resolveNativeSkillsEnabled } from "../../config/commands.js";
 import { resolveMarkdownTableMode } from "../../config/markdown-tables.js";
 import { danger, logVerbose } from "../../globals.js";
@@ -204,7 +204,9 @@ export function registerSlackMonitorSlashCommands(params: {
       const effectiveAllowFrom = normalizeAllowList([...ctx.allowFrom, ...storeAllowFrom]);
       const effectiveAllowFromLower = normalizeAllowListLower(effectiveAllowFrom);
 
-      let commandAuthorized = true;
+      // Privileged command surface: compute CommandAuthorized, don't assume true.
+      // Keep this aligned with the Slack message path (message-handler/prepare.ts).
+      let commandAuthorized = false;
       let channelConfig: SlackChannelConfigResolved | null = null;
       if (isDirectMessage) {
         if (!ctx.dmEnabled || ctx.dmPolicy === "disabled") {
@@ -256,7 +258,6 @@ export function registerSlackMonitorSlashCommands(params: {
             }
             return;
           }
-          commandAuthorized = true;
         }
       }
 
@@ -322,6 +323,13 @@ export function registerSlackMonitorSlashCommands(params: {
         id: command.user_id,
         name: senderName,
       }).allowed;
+      // DMs: allow chatting in dmPolicy=open, but keep privileged command gating intact by setting
+      // CommandAuthorized based on allowlists/access-groups (downstream decides which commands need it).
+      commandAuthorized = resolveCommandAuthorizedFromAuthorizers({
+        useAccessGroups: ctx.useAccessGroups,
+        authorizers: [{ configured: effectiveAllowFromLower.length > 0, allowed: ownerAllowed }],
+        modeWhenAccessGroupsOff: "configured",
+      });
       if (isRoomish) {
         commandAuthorized = resolveCommandAuthorizedFromAuthorizers({
           useAccessGroups: ctx.useAccessGroups,
@@ -329,6 +337,7 @@ export function registerSlackMonitorSlashCommands(params: {
             { configured: effectiveAllowFromLower.length > 0, allowed: ownerAllowed },
             { configured: channelUsersAllowlistConfigured, allowed: channelUserAllowed },
           ],
+          modeWhenAccessGroupsOff: "configured",
         });
         if (ctx.useAccessGroups && !commandAuthorized) {
           await respond({
@@ -373,7 +382,7 @@ export function registerSlackMonitorSlashCommands(params: {
         accountId: account.accountId,
         teamId: ctx.teamId || undefined,
         peer: {
-          kind: isDirectMessage ? "dm" : isRoom ? "channel" : "group",
+          kind: isDirectMessage ? "direct" : isRoom ? "channel" : "group",
           id: isDirectMessage ? command.user_id : command.channel_id,
         },
       });
@@ -393,6 +402,7 @@ export function registerSlackMonitorSlashCommands(params: {
 
       const ctxPayload = finalizeInboundContext({
         Body: prompt,
+        BodyForAgent: prompt,
         RawBody: prompt,
         CommandBody: prompt,
         CommandArgs: commandArgs,
@@ -434,11 +444,18 @@ export function registerSlackMonitorSlashCommands(params: {
         OriginatingTo: `user:${command.user_id}`,
       });
 
+      const { onModelSelected, ...prefixOptions } = createReplyPrefixOptions({
+        cfg,
+        agentId: route.agentId,
+        channel: "slack",
+        accountId: route.accountId,
+      });
+
       const { counts } = await dispatchReplyWithDispatcher({
         ctx: ctxPayload,
         cfg,
         dispatcherOptions: {
-          responsePrefix: resolveEffectiveMessagesConfig(cfg, route.agentId).responsePrefix,
+          ...prefixOptions,
           deliver: async (payload) => {
             await deliverSlackSlashReplies({
               replies: [payload],
@@ -457,7 +474,10 @@ export function registerSlackMonitorSlashCommands(params: {
             runtime.error?.(danger(`slack slash ${info.kind} reply failed: ${String(err)}`));
           },
         },
-        replyOptions: { skillFilter: channelConfig?.skills },
+        replyOptions: {
+          skillFilter: channelConfig?.skills,
+          onModelSelected,
+        },
       });
       if (counts.final + counts.tool + counts.block === 0) {
         await deliverSlackSlashReplies({
