@@ -1,0 +1,10 @@
+{
+  "id": "zoomwarriors-write",
+  "name": "ZoomWarriors2 Write",
+  "description": "ZoomWarriors2 write tools - create orders, submit section data, generate and download SOW documents",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

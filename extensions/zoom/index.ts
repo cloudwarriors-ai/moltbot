@@ -3,6 +3,7 @@ import { emptyPluginConfigSchema } from "openclaw/plugin-sdk";
 
 import { zoomPlugin } from "./src/channel.js";
 import { setZoomRuntime } from "./src/runtime.js";
+import { registerZoomTools } from "./src/tools.js";
 
 export { monitorZoomProvider } from "./src/monitor.js";
 
@@ -14,6 +15,7 @@ const plugin = {
   register(api: OpenClawPluginApi) {
     setZoomRuntime(api.runtime);
     api.registerChannel({ plugin: zoomPlugin });
+    registerZoomTools(api);
   },
 };
 

@@ -1,12 +1,20 @@
 {
   "name": "@openclaw/zoom",
   "version": "2026.1.27-beta.1",
-  "type": "module",
   "description": "OpenClaw Zoom Team Chat channel plugin",
+  "type": "module",
+  "dependencies": {
+    "express": "^5.2.1"
+  },
+  "devDependencies": {
+    "openclaw": "workspace:*"
+  },
   "openclaw": {
-    "extensions": [
-      "./index.ts"
-    ],
+    "install": {
+      "npmSpec": "@openclaw/zoom",
+      "localPath": "extensions/zoom",
+      "defaultChoice": "npm"
+    },
     "channel": {
       "id": "zoom",
       "label": "Zoom Team Chat",
@@ -17,16 +25,8 @@
       "aliases": [],
       "order": 70
     },
-    "install": {
-      "npmSpec": "@openclaw/zoom",
-      "localPath": "extensions/zoom",
-      "defaultChoice": "npm"
-    }
-  },
-  "dependencies": {
-    "express": "^5.2.1"
-  },
-  "devDependencies": {
-    "openclaw": "workspace:*"
+    "extensions": [
+      "./index.ts"
+    ]
   }
 }

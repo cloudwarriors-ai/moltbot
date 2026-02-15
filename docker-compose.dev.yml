@@ -1,0 +1,68 @@
+services:
+  openclaw:
+    build:
+      context: .
+      args:
+        NGROK_AUTH_TOKEN: ${NGROK_AUTH_TOKEN}
+    image: openclaw:local
+    container_name: openclaw
+    user: root
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - GITHUB_2FA_CLIENT_ID=${GITHUB_2FA_CLIENT_ID}
+      - GITHUB_2FA_CLIENT_SECRET=${GITHUB_2FA_CLIENT_SECRET}
+      - GITHUB_2FA_BASE_URL=https://${NGROK_DOMAIN}
+      - NGROK_AUTH_TOKEN=${NGROK_AUTH_TOKEN}
+      - NGROK_DOMAIN=${NGROK_DOMAIN}
+      - PROJECT_PULSE_URL=${PROJECT_PULSE_URL}
+      - PROJECT_PULSE_EMAIL=${PROJECT_PULSE_EMAIL}
+      - PROJECT_PULSE_PASSWORD=${PROJECT_PULSE_PASSWORD}
+      - OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN:-dev-token}
+      - CLAWDBOT_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN:-dev-token}
+      - BIGHEAD_API_URL=http://bighead:8000
+      - ZW2_USERNAME=${ZW2_USERNAME}
+      - ZW2_PASSWORD=${ZW2_PASSWORD}
+      - ZW2_URL=${ZW2_URL}
+      - ZOOM_CLIENT_ID=${ZOOM_CLIENT_ID}
+      - ZOOM_CLIENT_SECRET=${ZOOM_CLIENT_SECRET}
+      - ZOOM_ACCOUNT_ID=${ZOOM_ACCOUNT_ID}
+      - ZOOM_BOT_JID=${ZOOM_BOT_JID}
+      - ZOOM_WEBHOOK_SECRET_TOKEN=${ZOOM_WEBHOOK_SECRET_TOKEN}
+      - ZOOM_REPORT_ACCOUNT_ID=${ZOOM_REPORT_ACCOUNT_ID}
+      - ZOOM_REPORT_CLIENT_ID=${ZOOM_REPORT_CLIENT_ID}
+      - ZOOM_REPORT_CLIENT_SECRET=${ZOOM_REPORT_CLIENT_SECRET}
+      - ZOOM_REPORT_USER=${ZOOM_REPORT_USER}
+    volumes:
+      # Mount extensions + config + code for bot access
+      - ./extensions:/app/extensions
+      - ./.data/openclaw:/root/.openclaw
+      - ./code:/app/code
+      - ./scripts/tests:/app/tests
+    ports:
+      - "18789:18789"
+      - "18790:18790"
+      - "4000:4000"
+    command: ["node", "--max-old-space-size=3072", "dist/index.js", "gateway", "--bind", "lan", "--port", "18789", "--allow-unconfigured"]
+    mem_limit: 4g
+    memswap_limit: 4g
+    restart: unless-stopped
+    labels:
+      - "traefik.enable=true"
+      # Main UI/API
+      - "traefik.http.routers.openclaw.rule=Host(`molty-dev.cloudwarriors.ai`)"
+      - "traefik.http.routers.openclaw.entrypoints=websecure"
+      - "traefik.http.routers.openclaw.tls.certresolver=letsencrypt"
+      - "traefik.http.services.openclaw.loadbalancer.server.port=18789"
+      # Zoom webhook (port 4000) - higher priority to match before main router
+      - "traefik.http.routers.openclaw-zoom.rule=Host(`molty-dev.cloudwarriors.ai`) && PathPrefix(`/zoom/`)"
+      - "traefik.http.routers.openclaw-zoom.priority=100"
+      - "traefik.http.routers.openclaw-zoom.entrypoints=websecure"
+      - "traefik.http.routers.openclaw-zoom.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.openclaw-zoom.service=openclaw-zoom"
+      - "traefik.http.services.openclaw-zoom.loadbalancer.server.port=4000"
+
+networks:
+  default:
+    name: proxy
+    external: true

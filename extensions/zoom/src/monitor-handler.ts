@@ -1,11 +1,13 @@
 import type { OpenClawConfig, RuntimeEnv, GroupPolicy } from "openclaw/plugin-sdk";
 
+import { persistApprovedQA, appendCustomerDetail, loadChannelTraining } from "./channel-memory.js";
 import type { ZoomConversationStore } from "./conversation-store.js";
 import { formatUnknownError } from "./errors.js";
 import type { ZoomMonitorLogger } from "./monitor-types.js";
-import { getDynamicObservePolicy, toggleObserveChannel, setReviewChannel } from "./observe-config.js";
-import { getPendingApproval, storePendingApproval } from "./pending-approvals.js";
+import { getDynamicObservePolicy, enableObserveChannel, toggleObserveChannel, setReviewChannel } from "./observe-config.js";
+import { getPendingApproval, peekPendingApproval, storePendingApproval } from "./pending-approvals.js";
 import { getPendingShare } from "./pending-shares.js";
+import { consumeTrainingSession, storeTrainingSession } from "./pending-training.js";
 import { createUploadToken } from "./upload-tokens.js";
 import { isZoomGroupAllowed, resolveZoomAllowlistMatch, resolveZoomObservePolicy, resolveZoomReplyPolicy, resolveZoomRouteConfig } from "./policy.js";
 import type { ZoomConfig, ZoomCredentials, ZoomWebhookEvent } from "./types.js";
@@ -78,6 +80,12 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
         log.info(`team_chat payload: ${JSON.stringify(event.payload)}`);
       }
       await handleChannelMessage(event);
+      return;
+    }
+
+    // Handle bot added to a channel — auto-enable observe mode
+    if (eventType === "team_chat.app_conversation_opened" || eventType === "team_chat.app_invited") {
+      await handleAppConversationOpened(event);
       return;
     }
 
@@ -217,6 +225,13 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
         conversationType: "direct",
       });
 
+      // Check if this DM is feedback for an active training session
+      const training = consumeTrainingSession(userJid);
+      if (training) {
+        await handleTrainingFeedback({ userJid, userName, feedback: messageText, training });
+        return;
+      }
+
       // Route to agent
       await routeToAgent({
         conversationId: userJid,
@@ -303,6 +318,29 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
         text: pending.proposedAnswer,
         isChannel: true,
       });
+
+      // Persist Q&A + customer context to channel memory
+      try {
+        await persistApprovedQA({
+          channelName: pending.originalChannelName,
+          channelJid: pending.originalChannelJid,
+          senderName: pending.originalSenderName,
+          question: pending.originalQuestion,
+          answer: pending.proposedAnswer,
+        });
+        // Extract customer environment details and add to profile
+        const details = extractCustomerDetails(pending.originalQuestion, pending.proposedAnswer);
+        for (const detail of details) {
+          await appendCustomerDetail({
+            channelName: pending.originalChannelName,
+            channelJid: pending.originalChannelJid,
+            detail,
+          });
+        }
+      } catch (err) {
+        log.error("failed to persist approved Q&A to memory", { err });
+      }
+
       // Confirm to reviewer via DM
       await sendZoomTextMessage({
         cfg,
@@ -336,6 +374,48 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
         text: "Answer rejected and discarded.",
         isChannel: false,
       });
+      return;
+    }
+
+    // Handle train answer from observe mode — ask reviewer for feedback
+    if (value.startsWith("train_answer:")) {
+      const refId = value.slice("train_answer:".length);
+      const pending = peekPendingApproval(refId);
+      const { sendZoomTextMessage } = await import("./send.js");
+      if (!pending) {
+        log.debug("pending approval not found or expired for training", { refId });
+        await sendZoomTextMessage({
+          cfg,
+          to: userJid,
+          text: "This approval has expired. The original question will need to be asked again.",
+          isChannel: false,
+        });
+        return;
+      }
+
+      // Look up the review channel for this observed channel
+      const routeConfig = resolveZoomRouteConfig({ cfg: zoomCfg, channelJid: pending.originalChannelJid, channelName: pending.originalChannelName });
+      const staticObserve = resolveZoomObservePolicy({ channelConfig: routeConfig.channelConfig });
+      const dynamicObserve = await getDynamicObservePolicy(pending.originalChannelJid);
+      const reviewChannelJid = staticObserve.reviewChannelJid ?? dynamicObserve.reviewChannelJid ?? "";
+
+      storeTrainingSession(userJid, {
+        approvalRefId: refId,
+        originalChannelJid: pending.originalChannelJid,
+        originalChannelName: pending.originalChannelName,
+        originalSenderName: pending.originalSenderName,
+        originalQuestion: pending.originalQuestion,
+        previousAnswer: pending.proposedAnswer,
+        reviewChannelJid,
+      });
+
+      await sendZoomTextMessage({
+        cfg,
+        to: userJid,
+        text: `**Training mode** — What should change about this answer?\n\n**Question:** ${pending.originalQuestion}\n**Current answer:** ${pending.proposedAnswer}\n\nReply with your feedback and I'll regenerate the answer.`,
+        isChannel: false,
+      });
+      log.info("training session started", { refId, userJid });
       return;
     }
 
@@ -391,10 +471,10 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
     const eventPayload = event.payload as Record<string, unknown>;
     const message = isTeamChatEvent ? undefined : payload.message;
     const senderId = isTeamChatEvent
-      ? (eventPayload.operator_id ?? eventPayload.operator_member_id ?? eventPayload.operator) as string | undefined
+      ? ((eventPayload.operator_id as string) || (eventPayload.operator_member_id as string) || (eventPayload.operator as string) || undefined)
       : (message?.sender ?? message?.sender_member_id);
     const senderName = isTeamChatEvent
-      ? (eventPayload.operator as string | undefined)
+      ? ((eventPayload.operator as string) || undefined)
       : message?.sender_display_name;
     const robotJidInPayload = isTeamChatEvent ? undefined : (message?.robot_jid ?? payload.robot_jid);
     const messageText = isTeamChatEvent
@@ -403,6 +483,9 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
     const messageId = isTeamChatEvent
       ? (payload as Record<string, unknown>).message_id as string | undefined
       : message?.id;
+    const replyMainMessageId = isTeamChatEvent
+      ? (payload as Record<string, unknown>).reply_main_message_id as string | undefined
+      : message?.reply_main_message_id;
 
     if (!channelJid || !senderId || !messageText) {
       log.debug("channel message missing required fields", {
@@ -478,6 +561,7 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
         channelJid,
         channelName,
         reviewChannelJid,
+        isThreadReply: Boolean(replyMainMessageId),
       });
       return;
     }
@@ -537,6 +621,37 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
     });
   }
 
+  async function handleAppConversationOpened(event: ZoomWebhookEvent) {
+    const payload = event.payload?.object ?? event.payload;
+    log.info(`app_invited/conversation_opened payload: ${JSON.stringify(event.payload)}`);
+
+    if (!payload) return;
+
+    const p = payload as Record<string, unknown>;
+    // Extract channel info — try multiple field names across event types
+    const rawChannelId = p.channel_id ?? p.toJid ?? p.to_jid;
+    const channelName = (p.channel_name ?? p.name) as string | undefined;
+
+    if (!rawChannelId) {
+      log.debug("app_conversation_opened: no channel_id in payload, skipping");
+      return;
+    }
+
+    const channelJid = String(rawChannelId).includes("@")
+      ? String(rawChannelId)
+      : `${rawChannelId}@conference.xmpp.zoom.us`;
+
+    // Auto-enable observe mode for this channel
+    await enableObserveChannel(channelJid, channelName);
+    log.info(`auto-enabled observe mode for channel: ${channelName ?? channelJid}`);
+
+    // Fire-and-forget: pull history and build training prompt
+    const { fetchAndTrainFromHistory } = await import("./history.js");
+    fetchAndTrainFromHistory(channelJid, channelName, creds, log).catch((err) =>
+      log.error(`history ingest failed for ${channelName ?? channelJid}: ${err}`),
+    );
+  }
+
   async function routeToAgent(params: {
     conversationId: string;
     senderId: string;
@@ -551,6 +666,151 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
     await routeMessageToAgent({ deps, ...params });
   }
 
+  async function handleTrainingFeedback(params: {
+    userJid: string;
+    userName?: string;
+    feedback: string;
+    training: import("./pending-training.js").TrainingSession;
+  }) {
+    const { userJid, feedback, training } = params;
+    const { sendZoomTextMessage } = await import("./send.js");
+
+    try {
+      log.info("processing training feedback", { userJid, approvalRefId: training.approvalRefId });
+
+      await sendZoomTextMessage({
+        cfg,
+        to: userJid,
+        text: "Got it — regenerating the answer with your feedback...",
+        isChannel: false,
+      });
+
+      // Build a prompt that includes the original question, previous answer, and reviewer feedback
+      const trainingPrompt = [
+        "[CHANNEL OBSERVE — TRAINING] A reviewer wants you to improve your previous answer.",
+        "Use memory_search to check for this customer's profile and relevant context.",
+        "",
+        `**Original question:** ${training.originalQuestion}`,
+        `**Your previous answer:** ${training.previousAnswer}`,
+        `**Reviewer feedback:** ${feedback}`,
+        "",
+        "Generate an improved answer based on the feedback. Keep it to 2-3 sentences, no bullet points, no headers, no markdown formatting. Write like a knowledgeable coworker in a chat.",
+      ].join("\n");
+
+      const route = core.channel.routing.resolveAgentRoute({
+        cfg,
+        channel: "zoom",
+        chatType: "channel",
+        from: training.originalSenderName,
+        to: training.originalChannelJid,
+        groupId: training.originalChannelJid,
+      });
+
+      const ctxPayload = core.channel.reply.finalizeInboundContext({
+        Body: trainingPrompt,
+        RawBody: feedback,
+        CommandBody: trainingPrompt,
+        From: `zoom:channel:${training.originalChannelJid}`,
+        To: training.originalChannelJid,
+        SessionKey: route.sessionKey,
+        AccountId: route.accountId,
+        ChatType: "channel",
+        ConversationLabel: training.originalSenderName,
+        SenderName: training.originalSenderName,
+        SenderId: training.originalSenderName,
+        GroupSubject: training.originalChannelName,
+        GroupChannel: training.originalChannelJid,
+        Provider: "zoom" as const,
+        Surface: "zoom" as const,
+        CommandAuthorized: true,
+        CommandSource: "text" as const,
+        OriginatingChannel: "zoom" as const,
+        OriginatingTo: training.originalChannelJid,
+      });
+
+      const collectedParts: string[] = [];
+      const { dispatcher, replyOptions, markDispatchIdle } =
+        core.channel.reply.createReplyDispatcherWithTyping({
+          humanDelay: core.channel.reply.resolveHumanDelayConfig(cfg, route.agentId),
+          deliver: async (payload) => {
+            if (payload.text) collectedParts.push(payload.text);
+          },
+          onError: (err, info) => {
+            const errMsg = err instanceof Error ? err.message : String(err);
+            log.error(`zoom training ${info.kind} reply failed: ${errMsg}`);
+          },
+        });
+
+      await core.channel.reply.dispatchReplyFromConfig({
+        ctx: ctxPayload,
+        cfg,
+        dispatcher,
+        replyOptions,
+      });
+
+      markDispatchIdle();
+
+      const newAnswer = collectedParts.join("\n").trim();
+      if (!newAnswer) {
+        await sendZoomTextMessage({
+          cfg,
+          to: userJid,
+          text: "Could not generate a new answer. Please try again or reject the original.",
+          isChannel: false,
+        });
+        return;
+      }
+
+      // Store new pending approval and send updated review card
+      const newRefId = storePendingApproval({
+        originalChannelJid: training.originalChannelJid,
+        originalChannelName: training.originalChannelName,
+        originalSenderName: training.originalSenderName,
+        originalQuestion: training.originalQuestion,
+        proposedAnswer: newAnswer,
+      });
+
+      const { sendZoomActionMessage } = await import("./send.js");
+      await sendZoomActionMessage({
+        cfg,
+        to: training.reviewChannelJid,
+        headText: "Revised Answer Review",
+        body: [
+          {
+            type: "message",
+            text: `**Channel:** ${training.originalChannelName}\n**From:** ${training.originalSenderName}\n**Question:** ${training.originalQuestion}\n\n**Previous Answer:**\n${training.previousAnswer}\n\n**Feedback:** ${feedback}\n\n**Revised Answer:**\n${newAnswer}`,
+          },
+          {
+            type: "actions",
+            items: [
+              { text: "Approve", value: `approve_answer:${newRefId}`, style: "Primary" },
+              { text: "Train", value: `train_answer:${newRefId}`, style: "Default" },
+              { text: "Reject", value: `reject_answer:${newRefId}`, style: "Danger" },
+            ],
+          },
+        ],
+        isChannel: true,
+      });
+
+      await sendZoomTextMessage({
+        cfg,
+        to: userJid,
+        text: "Revised answer sent to review channel for approval.",
+        isChannel: false,
+      });
+
+      log.info("training feedback processed, new review card sent", { newRefId, reviewChannelJid: training.reviewChannelJid });
+    } catch (err) {
+      log.error("failed to process training feedback", { error: formatUnknownError(err) });
+      await sendZoomTextMessage({
+        cfg,
+        to: userJid,
+        text: "Something went wrong while regenerating the answer. Please try again.",
+        isChannel: false,
+      }).catch(() => {});
+    }
+  }
+
   async function routeToAgentWithObserve(params: {
     conversationId: string;
     senderId: string;
@@ -559,11 +819,12 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
     channelJid: string;
     channelName?: string;
     reviewChannelJid: string;
+    isThreadReply?: boolean;
   }) {
-    const { conversationId, senderId, senderName, text, channelJid, channelName, reviewChannelJid } = params;
+    const { conversationId, senderId, senderName, text, channelJid, channelName, reviewChannelJid, isThreadReply } = params;
 
     try {
-      log.debug("routing to agent with observe mode", { conversationId, channelJid });
+      log.debug("routing to agent with observe mode", { conversationId, channelJid, isThreadReply });
 
       const route = core.channel.routing.resolveAgentRoute({
         cfg,
@@ -574,10 +835,51 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
         groupId: channelJid,
       });
 
+      // Load channel training data (if available) to inject into context
+      const training = await loadChannelTraining(channelName, channelJid);
+      const trainingBlock = training
+        ? [
+            "",
+            "[CHANNEL TRAINING DATA]",
+            "Use the following Q&A patterns and tool references from this channel's history to inform your responses.",
+            "When a request matches a tool action pattern, invoke the appropriate tool.",
+            "",
+            training,
+            "[END CHANNEL TRAINING DATA]",
+            "",
+          ].join("\n")
+        : "";
+
+      // Thread replies are follow-ups to the bot's clarifying question — don't filter them.
+      // New top-level messages get the observe wrapper to triage questions vs casual chat.
+      const body = isThreadReply
+        ? [
+            "[CHANNEL OBSERVE — FOLLOW-UP] The user replied to your clarifying question.",
+            "Use the channel training data below (if present) plus any memory_search results to give a tailored answer.",
+            "Give a short, direct answer in 2-3 sentences max. No bullet points, no headers, no markdown formatting. Write like a knowledgeable coworker in a chat — brief and conversational.",
+            "When the request involves an order, SOW, or pricing change, invoke the appropriate ZW2 tool.",
+            trainingBlock,
+            `User reply: ${text}`,
+          ].join("\n")
+        : [
+            "[CHANNEL OBSERVE MODE] A user posted a message in a channel you are monitoring.",
+            "Use the channel training data below (if present) to match questions to known Q&A patterns and tool actions.",
+            "If you find a matching Q&A pattern, give a brief response based on it (2-3 sentences, no formatting).",
+            "When the request involves an order, SOW, pricing, or configuration change, invoke the appropriate ZW2 tool.",
+            "If the message shares factual details about the customer's environment (user count, platform, features, licensing, setup, infrastructure, etc.), respond with [CUSTOMER_CONTEXT] followed by each fact on its own line. Example:",
+            "  [CUSTOMER_CONTEXT]",
+            "  500 users",
+            "  Using Microsoft Teams currently",
+            "If this is NOT a question AND NOT customer context (casual chat, greeting, acknowledgment, small talk), respond with exactly [NO_RESPONSE] and nothing else.",
+            "If it IS a new question with no matching training data, respond with ONE short clarifying question (1 sentence) to narrow down what they need.",
+            trainingBlock,
+            `User message: ${text}`,
+          ].join("\n");
+
       const ctxPayload = core.channel.reply.finalizeInboundContext({
-        Body: text,
+        Body: body,
         RawBody: text,
-        CommandBody: text,
+        CommandBody: body,
         From: `zoom:channel:${channelJid}`,
         To: conversationId,
         SessionKey: route.sessionKey,
@@ -630,6 +932,41 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
         return;
       }
 
+      // If the agent detected customer context/environment details, persist them
+      if (fullReply.includes("[CUSTOMER_CONTEXT]")) {
+        const lines = fullReply
+          .split("[CUSTOMER_CONTEXT]")[1]
+          .split("\n")
+          .map((l) => l.trim())
+          .filter((l) => l.length > 0);
+
+        const persisted: string[] = [];
+        for (const detail of lines) {
+          try {
+            await appendCustomerDetail({
+              channelName,
+              channelJid,
+              detail,
+            });
+            persisted.push(detail);
+          } catch (err) {
+            log.error("failed to persist customer detail", { err, detail });
+          }
+        }
+
+        if (persisted.length > 0) {
+          const { sendZoomTextMessage } = await import("./send.js");
+          await sendZoomTextMessage({
+            cfg,
+            to: reviewChannelJid,
+            text: `**Customer Context Captured** — ${channelName ?? channelJid}\nFrom: ${senderName ?? senderId}\n\n${persisted.map((d) => `• ${d}`).join("\n")}`,
+            isChannel: true,
+          });
+          log.info("observe mode: persisted customer context", { channelJid, count: persisted.length });
+        }
+        return;
+      }
+
       // Store pending approval and send review card
       const refId = storePendingApproval({
         originalChannelJid: channelJid,
@@ -653,6 +990,7 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
             type: "actions",
             items: [
               { text: "Approve", value: `approve_answer:${refId}`, style: "Primary" },
+              { text: "Train", value: `train_answer:${refId}`, style: "Default" },
               { text: "Reject", value: `reject_answer:${refId}`, style: "Danger" },
             ],
           },
@@ -760,4 +1098,47 @@ export async function routeMessageToAgent(params: {
   } catch (err) {
     log.error("failed to route to agent", { error: formatUnknownError(err) });
   }
+}
+
+/**
+ * Extract customer environment details from Q&A text.
+ * Returns short factual statements suitable for a customer profile.
+ */
+function extractCustomerDetails(question: string, answer: string): string[] {
+  const combined = `${question} ${answer}`;
+  const details: string[] = [];
+
+  // Platform / competitor mentions
+  const platformMatch = combined.match(/(?:using|running|on|from|migrating from|switching from)\s+(Microsoft Teams|Cisco|RingCentral|8x8|Avaya|Vonage|Mitel|Genesys|Five9|Dialpad)/i);
+  if (platformMatch) details.push(`Current/previous platform: ${platformMatch[1]}`);
+
+  // User count
+  const userCountMatch = combined.match(/(\d[\d,]*)\s*(?:users?|seats?|employees?|extensions?|agents?|lines?)/i);
+  if (userCountMatch) details.push(`Approximate size: ${userCountMatch[1]} ${userCountMatch[0].replace(userCountMatch[1], "").trim()}`);
+
+  // License type
+  const licenseMatch = combined.match(/(?:on|have|using)\s+(?:the\s+)?(Pro|Business|Enterprise|Zoom\s+(?:One|Workplace|Phone)(?:\s+\w+)?)\s+(?:plan|license|tier)/i);
+  if (licenseMatch) details.push(`License/plan: ${licenseMatch[1]}`);
+
+  // Key features they care about
+  const featurePatterns: [RegExp, string][] = [
+    [/executive[- ]?assistant|delegation/i, "Needs executive-assistant delegation"],
+    [/call\s*queue|hunt\s*group/i, "Uses call queues / hunt groups"],
+    [/auto[- ]?attendant|ivr/i, "Uses auto-attendant / IVR"],
+    [/common\s*area\s*phone|lobby\s*phone/i, "Has common area phones"],
+    [/contact\s*center|call\s*center/i, "Has contact center needs"],
+    [/international|global|multi[- ]?country|multiple\s*countries/i, "Multi-country / international deployment"],
+    [/analog|ata\b|fax\s*machine/i, "Has analog/fax devices"],
+    [/hot[- ]?desk/i, "Uses hot desking"],
+    [/salesforce|hubspot|crm/i, "CRM integration required"],
+    [/sso|saml|okta|azure\s*ad/i, "Uses SSO / identity provider"],
+    [/recording|compliance/i, "Call recording / compliance needs"],
+    [/e911|emergency\s*(?:calling|services)/i, "E911 requirements"],
+  ];
+
+  for (const [re, label] of featurePatterns) {
+    if (re.test(combined)) details.push(label);
+  }
+
+  return details;
 }

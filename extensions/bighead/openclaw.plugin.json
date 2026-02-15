@@ -1,0 +1,10 @@
+{
+  "id": "bighead",
+  "name": "Bighead",
+  "description": "Bighead AI avatar integration - send Rebecca to join Zoom meetings",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

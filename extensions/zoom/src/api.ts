@@ -84,6 +84,13 @@ export type ZoomSendMessageParams = {
     body?: Array<{
       type: "message" | "attachments" | "section" | "actions";
       text?: string;
+      at_items?: Array<{
+        at_type: number;
+        start_index: number;
+        end_index: number;
+        at_contact?: string;
+      }>;
+      items?: Array<{ text: string; value: string; style?: string }>;
       resource_url?: string;
       information?: { title?: { text?: string }; description?: { text?: string } };
     }>;
@@ -127,6 +134,23 @@ export async function sendZoomMessage(
     body,
   });
 }
+
+// -- Chat message types (for history ingest) --
+
+export type ZoomChatMessage = {
+  id: string;
+  message: string;
+  sender: string;
+  date_time: string;
+  timestamp: number;
+  reply_main_message_id?: string;
+};
+
+export type ZoomMessageListResponse = {
+  messages: ZoomChatMessage[];
+  next_page_token?: string;
+  page_size: number;
+};
 
 export type ZoomBotInfo = {
   robot_jid: string;

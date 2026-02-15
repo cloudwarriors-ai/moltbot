@@ -1,0 +1,12 @@
+{
+  "name": "@openclaw/bighead",
+  "version": "2026.2.6",
+  "description": "Bighead AI avatar integration - join meetings, control Rebecca",
+  "type": "module",
+  "devDependencies": {
+    "openclaw": "workspace:*"
+  },
+  "openclaw": {
+    "extensions": ["./index.ts"]
+  }
+}

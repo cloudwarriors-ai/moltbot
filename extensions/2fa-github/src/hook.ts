@@ -56,6 +56,13 @@ function isProtectedOperation(
 
   if (["Bash", "exec"].includes(toolName)) {
     const command = (params.command as string) || "";
+
+    // Block commands that leak secrets
+    const leakPatterns = [/^\s*env\s*$/, /\bprintenv\b/, /\bset\s*$/, /\/proc\/\S*\/environ/];
+    if (leakPatterns.some((p) => p.test(command))) {
+      return true;
+    }
+
     for (const protectedPath of protectedPaths) {
       if (command.includes(protectedPath)) {
         const modifyPatterns = [
@@ -251,7 +258,10 @@ export function register2FAHook(api: OpenClawPluginApi): void {
   api.on("before_tool_call", async (event, ctx) => {
     const toolName = event.toolName;
     const params = event.params as Record<string, unknown>;
-    const sessionKey = ctx.sessionKey ?? "default";
+    // Normalize session key: strip per-request UUIDs so trust persists across
+    // all sessions for the same agent (e.g. "agent:main:openai:xxx" → "agent:main")
+    const rawSessionKey = ctx.sessionKey ?? "default";
+    const sessionKey = rawSessionKey.replace(/:(openai|openresponses):[0-9a-f-]+$/i, "");
 
     api.logger.info?.(`2fa-github: before_tool_call hook fired for tool: ${toolName}`);
 

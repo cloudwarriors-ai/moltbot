@@ -673,7 +673,7 @@ export async function runEmbeddedPiAgent(
                 ? [
                     {
                       id: `call_${Date.now()}`,
-                      name: attempt.clientToolCall.name,
+                      name: attempt.clientToolCall.name.trim(),
                       arguments: JSON.stringify(attempt.clientToolCall.params),
                     },
                   ]

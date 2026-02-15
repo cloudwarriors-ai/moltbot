@@ -35,6 +35,20 @@ async function writeConfig(config: ObserveConfigData): Promise<void> {
   await writeJsonFile(filePath, config);
 }
 
+/** Enable observe mode for a channel (idempotent — no-ops if already enabled). */
+export async function enableObserveChannel(
+  channelJid: string,
+  channelName?: string,
+): Promise<void> {
+  const filePath = resolveFilePath();
+  await withFileLock(filePath, empty, async () => {
+    const config = await readConfig();
+    if (config.observedChannels[channelJid]?.enabled) return; // already enabled
+    config.observedChannels[channelJid] = { enabled: true, channelName };
+    await writeConfig(config);
+  });
+}
+
 /** Toggle observe mode for a channel. Returns the new state. */
 export async function toggleObserveChannel(
   channelJid: string,

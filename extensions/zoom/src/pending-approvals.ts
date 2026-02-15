@@ -75,3 +75,28 @@ export function getPendingApproval(
     proposedAnswer: entry.proposedAnswer,
   };
 }
+
+/** Read a pending approval without consuming it. */
+export function peekPendingApproval(
+  refId: string,
+): {
+  originalChannelJid: string;
+  originalChannelName: string;
+  originalSenderName: string;
+  originalQuestion: string;
+  proposedAnswer: string;
+} | undefined {
+  const entry = store.get(refId);
+  if (!entry) return undefined;
+  if (entry.expiresAt <= Date.now()) {
+    store.delete(refId);
+    return undefined;
+  }
+  return {
+    originalChannelJid: entry.originalChannelJid,
+    originalChannelName: entry.originalChannelName,
+    originalSenderName: entry.originalSenderName,
+    originalQuestion: entry.originalQuestion,
+    proposedAnswer: entry.proposedAnswer,
+  };
+}

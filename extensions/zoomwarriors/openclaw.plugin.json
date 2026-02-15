@@ -1,0 +1,10 @@
+{
+  "id": "zoomwarriors",
+  "name": "ZoomWarriors2",
+  "description": "ZoomWarriors2 presales quoting platform - search orders, get project details, pricing, and SOW status",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

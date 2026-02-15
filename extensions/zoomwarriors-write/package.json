@@ -1,0 +1,12 @@
+{
+  "name": "@openclaw/zoomwarriors-write",
+  "version": "2026.2.12",
+  "description": "ZoomWarriors2 write tools - create orders, submit sections, generate SOW",
+  "type": "module",
+  "devDependencies": {
+    "openclaw": "workspace:*"
+  },
+  "openclaw": {
+    "extensions": ["./index.ts"]
+  }
+}

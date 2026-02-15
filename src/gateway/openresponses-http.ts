@@ -553,7 +553,7 @@ export async function handleOpenResponsesHttpRequest(
               type: "function_call",
               id: functionCallItemId,
               call_id: functionCall.id,
-              name: functionCall.name,
+              name: functionCall.name.trim(),
               arguments: functionCall.arguments,
             },
           ],
@@ -829,7 +829,7 @@ export async function handleOpenResponsesHttpRequest(
             type: "function_call" as const,
             id: functionCallItemId,
             call_id: functionCall.id,
-            name: functionCall.name,
+            name: functionCall.name.trim(),
             arguments: functionCall.arguments,
           };
           writeSseEvent(res, {

@@ -1,0 +1,9 @@
+--- a/dist/agent-loop.js
++++ b/dist/agent-loop.js
+@@ -210,6 +210,7 @@
+     for (let index = 0; index < toolCalls.length; index++) {
+         const toolCall = toolCalls[index];
++        if (typeof toolCall.name === "string") toolCall.name = toolCall.name.trim();
+         const tool = tools?.find((t) => t.name === toolCall.name);
+         stream.push({
+             type: "tool_execution_start",

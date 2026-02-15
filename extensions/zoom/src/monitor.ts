@@ -6,6 +6,7 @@ import { createZoomConversationStoreFs } from "./conversation-store-fs.js";
 import { formatUnknownError } from "./errors.js";
 import { createZoomMessageHandler } from "./monitor-handler.js";
 import type { ZoomMonitorLogger } from "./monitor-types.js";
+import { createUploadRoutes } from "./upload-handler.js";
 import { resolveZoomCredentials } from "./token.js";
 import type { ZoomConfig, ZoomCredentials } from "./types.js";
 import { handleZoomChallenge, verifyZoomWebhook } from "./webhook.js";
@@ -84,6 +85,18 @@ export async function monitorZoomProvider(
     conversationStore,
     log: log as ZoomMonitorLogger,
   });
+
+  // File-upload routes
+  const uploadRoutes = createUploadRoutes({
+    cfg, runtime, creds, textLimit, conversationStore, log: log as ZoomMonitorLogger,
+  });
+  expressApp.get("/zoom/file", uploadRoutes.handleGet);
+  expressApp.post("/zoom/file", express.json({ limit: "15mb" }), uploadRoutes.handlePost);
+
+  // Serve uploaded files
+  const path = await import("node:path");
+  const uploadDir = path.resolve(".data/zoom-uploads");
+  expressApp.use("/zoom/uploads", express.static(uploadDir));
 
   // Webhook endpoint
   expressApp.post(webhookPath, async (req: Request, res: Response) => {

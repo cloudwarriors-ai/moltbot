@@ -71,3 +71,9 @@ USER.md
 
 # local tooling
 .serena/
+
+# Runtime data & secrets
+.data/
+code/
+claude-expert/
+intake/

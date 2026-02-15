@@ -4,6 +4,12 @@ FROM node:22-bookworm
 RUN curl -fsSL https://bun.sh/install | bash
 ENV PATH="/root/.bun/bin:${PATH}"
 
+# Install ngrok (used by 2fa-github extension for OAuth callback)
+RUN curl -fsSL https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-$(dpkg --print-architecture).tgz \
+    | tar xz -C /usr/local/bin
+ARG NGROK_AUTH_TOKEN=""
+RUN if [ -n "$NGROK_AUTH_TOKEN" ]; then ngrok config add-authtoken "$NGROK_AUTH_TOKEN"; fi
+
 RUN corepack enable
 
 WORKDIR /app

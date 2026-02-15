@@ -104,8 +104,15 @@ export type ZoomActionButton = {
   style?: "Primary" | "Danger" | "Default" | "Disabled";
 };
 
+export type ZoomAtItem = {
+  at_type: number;
+  start_index: number;
+  end_index: number;
+  at_contact?: string;
+};
+
 export type ZoomBodyItem =
-  | { type: "message"; text: string }
+  | { type: "message"; text: string; at_items?: ZoomAtItem[] }
   | { type: "actions"; items: ZoomActionButton[] };
 
 export type ZoomAccessToken = {
