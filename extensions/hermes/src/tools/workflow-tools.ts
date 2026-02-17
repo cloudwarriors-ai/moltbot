@@ -51,7 +51,10 @@ export function registerWorkflowTools(api: OpenClawPluginApi, client: HermesClie
           if (projectDir) body.projectDir = projectDir;
           if (skippedPhases) body.skippedPhases = skippedPhases;
 
-          const result = await client.post("/api/prompt/send", body);
+          const result = await client.post<{ workflowId: string; status: string }>(
+            "/api/prompt/send",
+            body,
+          );
 
           return {
             content: [
@@ -139,17 +142,15 @@ export function registerWorkflowTools(api: OpenClawPluginApi, client: HermesClie
         try {
           const { workflowId } = params as { workflowId: string };
 
-          // Fetch both workflow and phases in parallel
-          const [workflow, phases] = await Promise.all([
-            client.get(`/api/prompt/workflows/${workflowId}`),
-            client.get(`/api/prompt/workflows/${workflowId}/phases`),
-          ]);
-
-          const phaseList = Array.isArray(phases) ? phases : [];
+          const result = await client.get<{
+            workflow: Record<string, unknown>;
+            phases?: Record<string, unknown>[];
+          }>(`/api/prompt/workflows/${workflowId}`);
+          const workflow = result.workflow;
+          const phaseList = result.phases ?? [];
           const phaseSummary = phaseList
             .map(
-              (p: Record<string, unknown>) =>
-                `  - ${p.name}: ${p.status}${p.tokensUsed ? ` (${p.tokensUsed} tokens)` : ""}`,
+              (p) => `  - ${p.name}: ${p.status}${p.tokensUsed ? ` (${p.tokensUsed} tokens)` : ""}`,
             )
             .join("\n");
 

@@ -2,10 +2,11 @@
  * Hermes CLI Commands
  *
  * Registered under the `hermes` command group:
- *   hermes status       — Server health + active workflows + stalls
- *   hermes workflows    — List workflows (table format)
+ *   hermes status        — Server health + active workflows + stalls
+ *   hermes workflows     — List workflows (table format)
  *   hermes workflow <id> — Detailed workflow + phases
- *   hermes logs <id>    — Recent logs (supports --level, --limit)
+ *   hermes logs <id>     — Recent logs (supports --level, --limit)
+ *   hermes connections   — LLM provider connection status
  */
 
 import type { OpenClawPluginCliRegistrar } from "openclaw/plugin-sdk";
@@ -99,10 +100,11 @@ export function createHermesCli(client: HermesClient): OpenClawPluginCliRegistra
       .argument("<id>", "Workflow ID")
       .action(async (id) => {
         try {
-          const [workflow, phases] = await Promise.all([
-            client.get<HermesWorkflow>(`/api/prompt/workflows/${id}`),
-            client.get<HermesPhase[]>(`/api/prompt/workflows/${id}/phases`),
-          ]);
+          const result = await client.get<{ workflow: HermesWorkflow; phases: HermesPhase[] }>(
+            `/api/prompt/workflows/${id}`,
+          );
+          const workflow = result.workflow;
+          const phases = result.phases ?? [];
 
           console.log(`=== Workflow: ${workflow.id} ===`);
           console.log(`Status: ${workflow.status}`);
@@ -119,6 +121,35 @@ export function createHermesCli(client: HermesClient): OpenClawPluginCliRegistra
           }
         } catch (error) {
           console.error(`Failed to get workflow: ${error}`);
+          process.exitCode = 1;
+        }
+      });
+
+    hermes
+      .command("connections")
+      .description("LLM provider connection status")
+      .action(async () => {
+        try {
+          const status = await client.get<
+            Record<string, { authenticated: boolean; method?: string }>
+          >("/api/auth/status");
+          const entries = Object.entries(status);
+
+          if (entries.length === 0) {
+            console.log("No providers configured.");
+            return;
+          }
+
+          console.log("=== Provider Connections ===\n");
+          for (const [name, info] of entries) {
+            const icon = info.authenticated ? "\u2713" : "\u2717";
+            const method = info.method ? ` (${info.method})` : "";
+            console.log(
+              `  ${icon} ${name.padEnd(15)} ${info.authenticated ? "connected" : "not connected"}${method}`,
+            );
+          }
+        } catch (error) {
+          console.error(`Failed to get connection status: ${error}`);
           process.exitCode = 1;
         }
       });

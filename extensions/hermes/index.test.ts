@@ -59,11 +59,11 @@ describe("hermes plugin", () => {
     expect(hermesPlugin.description).toBeTruthy();
   });
 
-  it("registers all 16 tools", () => {
+  it("registers all 21 tools", () => {
     const { api, registered } = createMockApi();
     hermesPlugin.register(api as never);
 
-    expect(registered.length).toBe(16);
+    expect(registered.length).toBe(21);
 
     const toolNames = registered.map((r) => r.name);
     // Workflow tools (6)
@@ -87,6 +87,12 @@ describe("hermes plugin", () => {
     // Quality tools (2)
     expect(toolNames).toContain("hermes_quality_report");
     expect(toolNames).toContain("hermes_workflow_rating");
+    // Connection tools (5)
+    expect(toolNames).toContain("hermes_connection_status");
+    expect(toolNames).toContain("hermes_connect_provider");
+    expect(toolNames).toContain("hermes_complete_oauth");
+    expect(toolNames).toContain("hermes_disconnect_provider");
+    expect(toolNames).toContain("hermes_set_api_key");
   });
 
   it("registers a service", () => {

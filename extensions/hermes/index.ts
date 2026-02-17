@@ -12,6 +12,7 @@ import type { HermesPluginConfig } from "./src/types.js";
 import { createHermesCli } from "./src/cli/hermes-cli.js";
 import { HermesClient } from "./src/client.js";
 import { createHermesService } from "./src/service/health-check.js";
+import { registerConnectionTools } from "./src/tools/connection-tools.js";
 import { registerCouncilTools } from "./src/tools/council-tools.js";
 import { registerMonitoringTools } from "./src/tools/monitoring-tools.js";
 import { registerQualityTools } from "./src/tools/quality-tools.js";
@@ -71,12 +72,13 @@ const hermesPlugin = {
       `hermes: registered (baseUrl: ${config.baseUrl}, auth: ${config.apiKey ? "yes" : "no"})`,
     );
 
-    // Register all 16 tools
+    // Register all 21 tools
     registerWorkflowTools(api, client); // 6 tools
     registerServerTools(api, client); // 3 tools
     registerMonitoringTools(api, client); // 3 tools
     registerCouncilTools(api, client); // 2 tools
     registerQualityTools(api, client); // 2 tools
+    registerConnectionTools(api, client); // 5 tools
 
     // Service: connectivity check on startup
     api.registerService(createHermesService(api, client));
