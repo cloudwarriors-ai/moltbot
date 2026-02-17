@@ -52,7 +52,7 @@ export function registerServerTools(api: OpenClawPluginApi, client: HermesClient
       name: "hermes_create_server",
       label: "Create Server",
       description:
-        "Create and auto-start a new OpenCode server instance. The server will be available for workflows after creation.",
+        "Create and auto-start a new OpenCode server instance. The server starts immediately and is available for workflows. Requires a projectDir (the directory the server will operate in). The provider must be connected first (check via hermes_connection_status). Port is auto-assigned if omitted. Provider defaults to openrouter if not specified.",
       parameters: Type.Object({
         projectDir: Type.String({ description: "Project directory path for the OpenCode server" }),
         port: Type.Optional(

@@ -62,7 +62,7 @@ const hermesPlugin = {
   id: "hermes",
   name: "Hermes Orchestrator",
   description:
-    "Full access to the Hermes orchestration server — workflows, monitoring, council, quality, and servers",
+    "Full access to the Hermes orchestration server. Typical workflow: (1) hermes_connection_status to check LLM provider auth, (2) hermes_connect_provider or hermes_set_api_key if needed, (3) hermes_list_servers to find or hermes_create_server to create a server, (4) hermes_start_workflow to run a task. Monitor with hermes_system_status, hermes_get_workflow, hermes_workflow_logs. Providers: anthropic and openai use OAuth (browser URL), openrouter uses API key.",
 
   register(api: OpenClawPluginApi) {
     const config = parseConfig(api.pluginConfig);

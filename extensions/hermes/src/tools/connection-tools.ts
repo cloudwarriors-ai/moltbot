@@ -26,7 +26,7 @@ export function registerConnectionTools(api: OpenClawPluginApi, client: HermesCl
       name: "hermes_connection_status",
       label: "Connection Status",
       description:
-        "Check which LLM providers are connected to Hermes and their auth method (oauth, api key, etc). Use this before starting workflows to verify model access.",
+        "Check which LLM providers (anthropic, openai, openrouter) are connected to Hermes and their auth method. Always call this FIRST before starting workflows — workflows will fail if the required provider is not connected. Providers authenticate via OAuth (anthropic, openai) or API key (openrouter).",
       parameters: Type.Object({}),
       async execute() {
         try {
@@ -76,7 +76,7 @@ export function registerConnectionTools(api: OpenClawPluginApi, client: HermesCl
       name: "hermes_connect_provider",
       label: "Connect Provider",
       description:
-        "Start the connection flow for an LLM provider (anthropic, openai, openrouter). For OAuth providers (anthropic, openai), returns a URL the user must open in their browser. For API key providers (openrouter), use hermes_set_api_key instead.",
+        "Start the OAuth connection flow for an LLM provider. For anthropic and openai, returns a browser URL the user must open to authorize. Anthropic uses a code-paste flow (user copies code from callback page → submit via hermes_complete_oauth). OpenAI completes automatically after browser authorization. For openrouter, use hermes_set_api_key instead (API key auth, not OAuth). Save the 'state' value from the response — it's needed for hermes_complete_oauth.",
       parameters: Type.Object({
         provider: stringEnum(["anthropic", "openai", "openrouter"], {
           description: "The LLM provider to connect",
@@ -145,7 +145,7 @@ export function registerConnectionTools(api: OpenClawPluginApi, client: HermesCl
       name: "hermes_complete_oauth",
       label: "Complete OAuth",
       description:
-        "Complete an Anthropic OAuth flow by submitting the authorization code shown after browser authorization. Use after hermes_connect_provider returns requiresCodePaste: true.",
+        "Complete an Anthropic OAuth flow by submitting the authorization code. After the user opens the authUrl from hermes_connect_provider and authorizes in their browser, they see a code on the callback page. Submit that code here along with the state value from the original connect response. Only needed for Anthropic (OpenAI completes automatically).",
       parameters: Type.Object({
         code: Type.String({ description: "The authorization code from the OAuth callback page" }),
         state: Type.Optional(

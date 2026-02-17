@@ -10,7 +10,7 @@ export function registerWorkflowTools(api: OpenClawPluginApi, client: HermesClie
       name: "hermes_start_workflow",
       label: "Start Workflow",
       description:
-        "Start a new Hermes workflow. Sends a prompt to the orchestrator which runs it through plan→design→build→test→validate phases. Use flowType 'refactor' for modifying existing code. If serverId is omitted, auto-selects the first online server.",
+        "Start a new Hermes workflow. Prerequisites: (1) check hermes_connection_status — the provider for the target model must be connected, (2) ensure at least one server is online via hermes_list_servers (create one with hermes_create_server if needed). The orchestrator runs the prompt through plan→council→design→scaffold→build→test→validate→polish phases. Use flowType 'refactor' for modifying existing code. If serverId is omitted, auto-selects the first online server. Returns a workflowId for tracking.",
       parameters: Type.Object({
         prompt: Type.String({ description: "The development task to execute" }),
         flowType: Type.Optional(
