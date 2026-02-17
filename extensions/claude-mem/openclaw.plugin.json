@@ -1,0 +1,30 @@
+{
+  "id": "claude-mem",
+  "name": "Claude-Mem (Persistent Memory)",
+  "description": "Persistent memory compression system — records observations from agent sessions for cross-session context.",
+  "kind": "memory",
+  "version": "1.0.0",
+  "author": "thedotmack",
+  "homepage": "https://claude-mem.com",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "syncMemoryFile": {
+        "type": "boolean",
+        "default": true,
+        "description": "Automatically sync MEMORY.md on session start"
+      },
+      "workerPort": {
+        "type": "number",
+        "default": 37777,
+        "description": "Port for Claude-Mem worker service"
+      },
+      "project": {
+        "type": "string",
+        "default": "moltbot",
+        "description": "Project name for scoping observations in the memory database"
+      }
+    }
+  }
+}

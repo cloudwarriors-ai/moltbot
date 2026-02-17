@@ -1,15 +1,24 @@
 services:
+  claude-mem-chroma:
+    image: chromadb/chroma:1.0.0
+    container_name: claude-mem-chroma
+    volumes:
+      - ./.data/claude-mem/vector-db:/data
+    restart: unless-stopped
+    mem_limit: 512m
+
   openclaw:
     build:
       context: .
       args:
         NGROK_AUTH_TOKEN: ${NGROK_AUTH_TOKEN}
-    image: openclaw:local
+    image: openclaw:v2026.2.14-test
     container_name: openclaw
     user: root
     environment:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
       - GITHUB_2FA_CLIENT_ID=${GITHUB_2FA_CLIENT_ID}
       - GITHUB_2FA_CLIENT_SECRET=${GITHUB_2FA_CLIENT_SECRET}
       - GITHUB_2FA_BASE_URL=https://${NGROK_DOMAIN}
@@ -33,16 +42,19 @@ services:
       - ZOOM_REPORT_CLIENT_ID=${ZOOM_REPORT_CLIENT_ID}
       - ZOOM_REPORT_CLIENT_SECRET=${ZOOM_REPORT_CLIENT_SECRET}
       - ZOOM_REPORT_USER=${ZOOM_REPORT_USER}
+      - ADMIN_DOMAIN=${ADMIN_DOMAIN:-cloudwarriors.ai}
     volumes:
       # Mount extensions + config + code for bot access
       - ./extensions:/app/extensions
       - ./.data/openclaw:/root/.openclaw
+      - ./.data/claude-mem:/root/.claude-mem
       - ./code:/app/code
       - ./scripts/tests:/app/tests
     ports:
       - "18789:18789"
       - "18790:18790"
       - "4000:4000"
+      - "37777:37777"
     command: ["node", "--max-old-space-size=3072", "dist/index.js", "gateway", "--bind", "lan", "--port", "18789", "--allow-unconfigured"]
     mem_limit: 4g
     memswap_limit: 4g
