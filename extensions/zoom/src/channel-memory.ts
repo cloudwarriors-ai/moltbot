@@ -142,7 +142,10 @@ export async function writeChannelTraining(
 }
 
 /**
- * Load channel training data if it exists. Returns the markdown content or undefined.
+ * Load channel context for the agent: combines training.md (auto-ingested history)
+ * with channel.md (approved Q&A and customer profile from reviewer training).
+ * Channel.md is prioritized (appended last) so trained answers override history.
+ * Total output is capped at ~12KB to avoid overwhelming the agent context.
  */
 export async function loadChannelTraining(
   channelName?: string,
@@ -150,12 +153,50 @@ export async function loadChannelTraining(
 ): Promise<string | undefined> {
   const slug = sanitizeChannelName(channelName ?? channelJid?.split("@")[0] ?? "");
   if (!slug) return undefined;
-  const trainingPath = path.join(customerDir(slug), "training.md");
+
+  const dir = customerDir(slug);
+  const parts: string[] = [];
+
+  // 1. Load training.md (auto-ingested history Q&A patterns)
   try {
-    return await fs.readFile(trainingPath, "utf-8");
+    const training = await fs.readFile(path.join(dir, "training.md"), "utf-8");
+    // Cap history training at ~6KB — keep header + first N pairs
+    if (training.length > 6000) {
+      parts.push(training.slice(0, 6000) + "\n\n_(training history truncated)_");
+    } else {
+      parts.push(training);
+    }
   } catch {
-    return undefined;
+    // no training.md — that's ok
   }
+
+  // 2. Load channel.md (reviewer-approved Q&A + customer profile — higher priority)
+  try {
+    const channel = await fs.readFile(path.join(dir, "channel.md"), "utf-8");
+    if (channel.length > 6000) {
+      // Keep the profile section + most recent Q&A entries (end of file)
+      const profileEnd = channel.indexOf("## Q&A History");
+      const profileSection = profileEnd > 0 ? channel.slice(0, profileEnd) : "";
+      const qaSection = profileEnd > 0 ? channel.slice(profileEnd) : channel;
+      // Take the last ~5KB of Q&A (most recent entries)
+      const qaKeep = qaSection.length > 5000 ? qaSection.slice(-5000) : qaSection;
+      parts.push(
+        "\n## Reviewer-Trained Answers (HIGHEST PRIORITY — use these over history patterns)\n",
+        profileSection,
+        qaKeep,
+      );
+    } else {
+      parts.push(
+        "\n## Reviewer-Trained Answers (HIGHEST PRIORITY — use these over history patterns)\n",
+        channel,
+      );
+    }
+  } catch {
+    // no channel.md — that's ok
+  }
+
+  if (parts.length === 0) return undefined;
+  return parts.join("\n");
 }
 
 // ---------------------------------------------------------------------------

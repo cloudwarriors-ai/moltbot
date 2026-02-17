@@ -10,8 +10,10 @@ type PendingApproval = {
   originalChannelJid: string;
   originalChannelName: string;
   originalSenderName: string;
+  originalSenderJid?: string;
   originalQuestion: string;
   proposedAnswer: string;
+  silent?: boolean;
   expiresAt: number;
 };
 
@@ -33,14 +35,18 @@ function pruneExpired(): void {
   }
 }
 
-/** Store a pending approval and return its reference ID. */
-export function storePendingApproval(data: {
+type PendingApprovalData = {
   originalChannelJid: string;
   originalChannelName: string;
   originalSenderName: string;
+  originalSenderJid?: string;
   originalQuestion: string;
   proposedAnswer: string;
-}): string {
+  silent?: boolean;
+};
+
+/** Store a pending approval and return its reference ID. */
+export function storePendingApproval(data: PendingApprovalData): string {
   pruneExpired();
   const refId = generateRefId();
   store.set(refId, {
@@ -51,15 +57,7 @@ export function storePendingApproval(data: {
 }
 
 /** Retrieve and consume a pending approval (one-time use). */
-export function getPendingApproval(
-  refId: string,
-): {
-  originalChannelJid: string;
-  originalChannelName: string;
-  originalSenderName: string;
-  originalQuestion: string;
-  proposedAnswer: string;
-} | undefined {
+export function getPendingApproval(refId: string): PendingApprovalData | undefined {
   const entry = store.get(refId);
   if (!entry) return undefined;
   if (entry.expiresAt <= Date.now()) {
@@ -67,36 +65,18 @@ export function getPendingApproval(
     return undefined;
   }
   store.delete(refId);
-  return {
-    originalChannelJid: entry.originalChannelJid,
-    originalChannelName: entry.originalChannelName,
-    originalSenderName: entry.originalSenderName,
-    originalQuestion: entry.originalQuestion,
-    proposedAnswer: entry.proposedAnswer,
-  };
+  const { expiresAt: _, ...data } = entry;
+  return data;
 }
 
 /** Read a pending approval without consuming it. */
-export function peekPendingApproval(
-  refId: string,
-): {
-  originalChannelJid: string;
-  originalChannelName: string;
-  originalSenderName: string;
-  originalQuestion: string;
-  proposedAnswer: string;
-} | undefined {
+export function peekPendingApproval(refId: string): PendingApprovalData | undefined {
   const entry = store.get(refId);
   if (!entry) return undefined;
   if (entry.expiresAt <= Date.now()) {
     store.delete(refId);
     return undefined;
   }
-  return {
-    originalChannelJid: entry.originalChannelJid,
-    originalChannelName: entry.originalChannelName,
-    originalSenderName: entry.originalSenderName,
-    originalQuestion: entry.originalQuestion,
-    proposedAnswer: entry.proposedAnswer,
-  };
+  const { expiresAt: _, ...data } = entry;
+  return data;
 }

@@ -12,7 +12,7 @@ type ObserveConfigData = {
   reviewChannelJid?: string;
   reviewChannelName?: string;
   /** Map of channel JID → observe mode enabled */
-  observedChannels: Record<string, { enabled: boolean; channelName?: string }>;
+  observedChannels: Record<string, { enabled: boolean; channelName?: string; silent?: boolean }>;
 };
 
 const STORE_FILENAME = "zoom-observe-config.json";
@@ -89,10 +89,33 @@ export async function setReviewChannel(
   });
 }
 
+/** Toggle silent mode for an observed channel. Returns the new state. */
+export async function toggleSilentChannel(
+  channelJid: string,
+): Promise<{ silent: boolean; found: boolean }> {
+  const filePath = resolveFilePath();
+  let result = { silent: false, found: false };
+
+  await withFileLock(filePath, empty, async () => {
+    const config = await readConfig();
+    const entry = config.observedChannels[channelJid];
+    if (!entry?.enabled) {
+      result = { silent: false, found: false };
+      return;
+    }
+    entry.silent = !entry.silent;
+    await writeConfig(config);
+    result = { silent: entry.silent ?? false, found: true };
+  });
+
+  return result;
+}
+
 /** Get the dynamic observe policy for a channel. */
 export async function getDynamicObservePolicy(channelJid: string): Promise<{
   observeMode: boolean;
   reviewChannelJid?: string;
+  silent?: boolean;
 }> {
   const config = await readConfig();
   const entry = config.observedChannels[channelJid];
@@ -100,5 +123,6 @@ export async function getDynamicObservePolicy(channelJid: string): Promise<{
   return {
     observeMode: true,
     reviewChannelJid: config.reviewChannelJid,
+    silent: entry.silent,
   };
 }

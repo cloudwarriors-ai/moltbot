@@ -2,6 +2,7 @@ import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { emptyPluginConfigSchema } from "openclaw/plugin-sdk";
 
 import { zoomPlugin } from "./src/channel.js";
+import { shouldBlockTool, formatToolParams } from "./src/observe-tool-gate.js";
 import { setZoomRuntime } from "./src/runtime.js";
 import { registerZoomTools } from "./src/tools.js";
 
@@ -16,6 +17,21 @@ const plugin = {
     setZoomRuntime(api.runtime);
     api.registerChannel({ plugin: zoomPlugin });
     registerZoomTools(api);
+
+    // Gate write/mutation tools in observe-mode sessions.
+    // Blocks silently — the monitor handler sends one consolidated approval card after dispatch.
+    api.on("before_tool_call", async (event, ctx) => {
+      const result = shouldBlockTool(ctx.sessionKey, event.toolName, event.params);
+      if (!result.block) return;
+
+      const paramStr = formatToolParams(event.params);
+      api.logger.info?.(`zoom: blocked write tool ${event.toolName} in observe session`);
+
+      return {
+        block: true,
+        blockReason: `This action requires reviewer approval before execution. Tool: ${event.toolName}, Parameters: ${paramStr}. Do NOT retry this tool — the request is pending approval. Inform the user that their change request needs to be approved first.`,
+      };
+    });
   },
 };
 

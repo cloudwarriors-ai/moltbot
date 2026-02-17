@@ -194,7 +194,12 @@ const plugin = {
       }),
       async execute(_id: string, params: Record<string, unknown>) {
         try {
-          const data = await zw2Fetch(`/api/v1/orders/${params.order_id}/`);
+          const orderId = params.order_id as number;
+          const data = await zw2Fetch<Record<string, unknown>>(`/api/v1/orders/${orderId}/`);
+          // Replace raw sow_document media path with proper download endpoint
+          if (data.sow_document) {
+            data.sow_document = `${ZW2_BASE}/api/v1/orders/${orderId}/sow-download/`;
+          }
           return jsonResult({ ok: true, order: data });
         } catch (err) {
           return errorResult(err);
