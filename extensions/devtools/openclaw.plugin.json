@@ -1,0 +1,10 @@
+{
+  "id": "devtools",
+  "name": "DevTools API",
+  "description": "Docker container management and codebase file browsing via devtools-api",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}
