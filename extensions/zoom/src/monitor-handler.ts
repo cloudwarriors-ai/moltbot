@@ -1606,10 +1606,12 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
       // Roleplay messages use a customer-oriented prompt (no [NO_RESPONSE] filtering).
       const body = roleplay
         ? [
-            "[CHANNEL OBSERVE — CUSTOMER MESSAGE] This is a message from an external customer. Answer it directly.",
+            "[CHANNEL OBSERVE — CUSTOMER MESSAGE] This is a message from an external customer.",
+            "STEP 1 (MANDATORY): You MUST call memory_search with the customer's message BEFORE doing anything else. Do NOT skip this step. Do NOT output any text before calling memory_search.",
             memoryHint,
             "Also call the relevant ZW2 tools to fetch fresh data when the question involves orders, pricing, or SOW.",
-            "If a write tool is blocked, do NOT retry it and do NOT mention 'pending approval' in your response. Just respond with [NO_RESPONSE].",
+            "If a write tool is blocked, do NOT retry it. Just say you cannot complete that action right now.",
+            "ALWAYS respond to the customer — even if the message is vague, conversational, or not a direct question. This is a real customer; never ignore them. NEVER output [NO_RESPONSE].",
             "Give a short, direct answer with the actual data. No filler, no preamble. Just the facts in 2-4 sentences, conversational tone.",
             `Customer (${senderName}): ${text}`,
           ].join("\n")
@@ -1624,17 +1626,18 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
           ].join("\n")
         : [
             "[CHANNEL OBSERVE MODE] A user posted a message in a channel you are monitoring.",
-            "STEP 1 (MANDATORY): You MUST call memory_search with the user's message BEFORE doing anything else. Do NOT skip this step. Do NOT respond with [NO_RESPONSE] without calling memory_search first.",
+            "STEP 1 (MANDATORY): You MUST call memory_search with the user's message BEFORE doing anything else. Do NOT skip this step. Do NOT output ANY text before calling memory_search — not even [NO_RESPONSE].",
             memoryHint,
             "Also call the relevant ZW2 tools to fetch fresh data when the question involves orders, pricing, or SOW.",
             "If a write tool is blocked, do NOT retry it and do NOT mention 'pending approval' in your response. Just respond with [NO_RESPONSE].",
             "Give the actual data in your response. No filler, no preamble like 'let me look that up' or 'I have data from earlier'. Just the facts.",
-            "If the message shares factual details about the customer's environment (user count, platform, features, licensing, setup, infrastructure, etc.), respond with [CUSTOMER_CONTEXT] followed by each fact on its own line. Example:",
+            "IMPORTANT: If the message contains a REQUEST or ACTION (e.g. 'looking to get an estimate', 'can you check', 'I need help with'), treat it as a question — answer it or ask a clarifying question. Do NOT classify requests as customer context.",
+            "ONLY if the message is PURELY informational with no request (e.g. 'we have 500 users on Microsoft Teams'), respond with [CUSTOMER_CONTEXT] followed by each fact on its own line. Example:",
             "  [CUSTOMER_CONTEXT]",
             "  500 users",
             "  Using Microsoft Teams currently",
-            "ONLY after calling memory_search: if the message is NOT a question AND NOT customer context (casual chat, greeting, acknowledgment, small talk), respond with exactly [NO_RESPONSE] and nothing else.",
-            "If it IS a new question with no matching memory_search results, respond with ONE short clarifying question (1 sentence) to narrow down what they need.",
+            "ONLY after calling memory_search: if the message is NOT a question, NOT a request, AND NOT customer context (casual chat, greeting, acknowledgment, small talk), respond with exactly [NO_RESPONSE] and nothing else.",
+            "If it IS a new question or request with no matching memory_search results, respond with ONE short clarifying question (1 sentence) to narrow down what they need.",
             `User message: ${text}`,
           ].join("\n");
 
