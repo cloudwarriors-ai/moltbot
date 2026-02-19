@@ -31,6 +31,7 @@ RUN pnpm install --frozen-lockfile
 
 COPY . .
 RUN pnpm build
+RUN ln -s /app/dist/index.js /usr/local/bin/openclaw
 # Force pnpm for UI build (Bun may fail on ARM/Synology architectures)
 ENV OPENCLAW_PREFER_PNPM=1
 RUN pnpm ui:build
