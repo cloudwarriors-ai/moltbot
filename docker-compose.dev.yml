@@ -18,6 +18,7 @@ services:
     environment:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - ZOOM_PREFILTER_MODEL=${ZOOM_PREFILTER_MODEL}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - GITHUB_2FA_CLIENT_ID=${GITHUB_2FA_CLIENT_ID}
       - GITHUB_2FA_CLIENT_SECRET=${GITHUB_2FA_CLIENT_SECRET}
@@ -43,9 +44,12 @@ services:
       - ZOOM_REPORT_CLIENT_SECRET=${ZOOM_REPORT_CLIENT_SECRET}
       - ZOOM_REPORT_USER=${ZOOM_REPORT_USER}
       - ADMIN_DOMAIN=${ADMIN_DOMAIN:-cloudwarriors.ai}
+      - NODE_OPTIONS=--max-old-space-size=3072
+      - OPENCLAW_NO_RESPAWN=1
     volumes:
       # Mount extensions + config + code for bot access
       - ./extensions:/app/extensions
+      - ./src:/app/src
       - ./.data/openclaw:/root/.openclaw
       - ./.data/claude-mem:/root/.claude-mem
       - ./code:/app/code
@@ -55,7 +59,7 @@ services:
       - "18790:18790"
       - "4000:4000"
       - "37777:37777"
-    command: ["node", "--max-old-space-size=3072", "dist/index.js", "gateway", "--bind", "lan", "--port", "18789", "--allow-unconfigured"]
+    command: ["pnpm", "exec", "tsx", "watch", "src/entry.ts", "gateway", "--bind", "lan", "--port", "18789", "--allow-unconfigured"]
     mem_limit: 4g
     memswap_limit: 4g
     restart: unless-stopped

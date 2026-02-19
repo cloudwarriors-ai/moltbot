@@ -78,6 +78,11 @@ export type FollowupRun = {
     ownerNumbers?: string[];
     extraSystemPrompt?: string;
     enforceFinalTag?: boolean;
+    channelSlug?: string;
+    isSupport?: boolean;
+    defaultMemoryScope?: import("../../../memory/types.js").MemorySearchScope;
+    allowAllCustomersMemoryScope?: boolean;
+    excludeMemorySlugs?: string[];
   };
 };
 

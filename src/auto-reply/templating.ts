@@ -141,6 +141,16 @@ export type MsgContext = {
    * Used for hook confirmation messages like "Session context saved to memory".
    */
   HookMessages?: string[];
+  /** Channel slug for scoped memory search (support/observe contexts). */
+  ChannelSlug?: string;
+  /** True when this is a support/observe session. */
+  IsSupport?: boolean;
+  /** Default memory search scope for this session. */
+  DefaultMemoryScope?: string;
+  /** Whether all-customers scope is allowed (cross-channel training). */
+  AllowAllCustomersMemoryScope?: boolean;
+  /** Slugs to exclude from all-customers memory scope. */
+  ExcludeMemorySlugs?: string[];
 };
 
 export type FinalizedMsgContext = Omit<MsgContext, "CommandAuthorized"> & {

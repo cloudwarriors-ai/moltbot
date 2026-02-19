@@ -64,18 +64,32 @@ export function createUploadRoutes(deps: ZoomMessageHandlerDeps) {
       const sizeKB = Math.round((size as number) / 1024);
       const mime = String(mimeType || "application/octet-stream");
 
+      // Never inline full file content — large files kill the LLM context.
+      // Save the file, tell the agent where it is with a short preview.
+      const MAX_PREVIEW_BYTES = 2000;
       let agentText: string;
       if (mime.startsWith("image/")) {
-        // Reference file path only — do NOT inline base64 (causes memory blowup)
         agentText = `[FILE_UPLOAD image] ${safeName} (${mime}, ${sizeKB}KB) saved to ${filePath}`;
+      } else if (
+        mime === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
+        /\.docx$/i.test(safeName)
+      ) {
+        const { readDocxParagraphs } = await import("./docx-tools.js");
+        const paragraphs = await readDocxParagraphs(filePath);
+        const preview = paragraphs.slice(0, 10)
+          .map(p => `[${p.index}${p.style ? ` ${p.style}` : ""}] ${p.text}`)
+          .join("\n");
+        agentText = `[FILE_UPLOAD docx] ${safeName} (${sizeKB}KB, ${paragraphs.length} paragraphs) saved to ${filePath}\n\nPreview (first 10 paragraphs):\n${preview}`;
       } else if (
         mime.startsWith("text/") ||
         mime === "application/json" ||
         mime === "application/xml" ||
         /\.(txt|csv|json|xml|html|md|log|yaml|yml|toml)$/i.test(safeName)
       ) {
-        const textContent = fileBuffer.toString("utf-8");
-        agentText = `[FILE_UPLOAD document] ${safeName}\n\n${textContent}`;
+        const preview = fileBuffer.subarray(0, MAX_PREVIEW_BYTES).toString("utf-8");
+        const lines = preview.split("\n");
+        const truncated = fileBuffer.length > MAX_PREVIEW_BYTES ? `\n\n_(truncated — full file is ${sizeKB}KB, use \`exec cat ${filePath}\` to read more)_` : "";
+        agentText = `[FILE_UPLOAD document] ${safeName} (${mime}, ${sizeKB}KB, ${fileBuffer.toString("utf-8").split("\n").length} lines) saved to ${filePath}\n\nPreview (first ${lines.length} lines):\n${preview}${truncated}`;
       } else {
         agentText = `[FILE_UPLOAD] ${safeName} (${mime}, ${sizeKB}KB) saved to ${filePath}`;
       }

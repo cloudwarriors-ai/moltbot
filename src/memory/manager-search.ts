@@ -17,6 +17,31 @@ export type SearchRowResult = {
   source: SearchSource;
 };
 
+export type PathFilter = { sql: string; params: string[] } | undefined;
+
+export function buildPathFilter(pathPrefix?: string, alias?: string, excludePrefixes?: string[]): PathFilter {
+  if (!pathPrefix) return undefined;
+  const normalized = pathPrefix.replace(/[/\\]+/g, "/").replace(/^\/|\/$/g, "");
+  if (!normalized) return undefined;
+  const escaped = normalized.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
+  const col = alias ? `${alias}.path` : "path";
+  let sql = ` AND ${col} LIKE ? ESCAPE '\\'`;
+  const params = [`${escaped}/%`];
+
+  // Add NOT LIKE clauses for excluded prefixes
+  if (excludePrefixes?.length) {
+    for (const ep of excludePrefixes) {
+      const norm = ep.replace(/[/\\]+/g, "/").replace(/^\/|\/$/g, "");
+      if (!norm) continue;
+      const esc = norm.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
+      sql += ` AND ${col} NOT LIKE ? ESCAPE '\\'`;
+      params.push(`${esc}/%`);
+    }
+  }
+
+  return { sql, params };
+}
+
 export async function searchVector(params: {
   db: DatabaseSync;
   vectorTable: string;
@@ -27,11 +52,13 @@ export async function searchVector(params: {
   ensureVectorReady: (dimensions: number) => Promise<boolean>;
   sourceFilterVec: { sql: string; params: SearchSource[] };
   sourceFilterChunks: { sql: string; params: SearchSource[] };
+  pathFilter?: PathFilter;
 }): Promise<SearchRowResult[]> {
   if (params.queryVec.length === 0 || params.limit <= 0) {
     return [];
   }
   if (await params.ensureVectorReady(params.queryVec.length)) {
+    const pf = params.pathFilter;
     const rows = params.db
       .prepare(
         `SELECT c.id, c.path, c.start_line, c.end_line, c.text,\n` +
@@ -39,7 +66,7 @@ export async function searchVector(params: {
           `       vec_distance_cosine(v.embedding, ?) AS dist\n` +
           `  FROM ${params.vectorTable} v\n` +
           `  JOIN chunks c ON c.id = v.id\n` +
-          ` WHERE c.model = ?${params.sourceFilterVec.sql}\n` +
+          ` WHERE c.model = ?${params.sourceFilterVec.sql}${pf?.sql ?? ""}\n` +
           ` ORDER BY dist ASC\n` +
           ` LIMIT ?`,
       )
@@ -47,6 +74,7 @@ export async function searchVector(params: {
         vectorToBlob(params.queryVec),
         params.providerModel,
         ...params.sourceFilterVec.params,
+        ...(pf?.params ?? []),
         params.limit,
       ) as Array<{
       id: string;
@@ -72,6 +100,7 @@ export async function searchVector(params: {
     db: params.db,
     providerModel: params.providerModel,
     sourceFilter: params.sourceFilterChunks,
+    pathFilter: params.pathFilter,
   });
   const scored = candidates
     .map((chunk) => ({
@@ -97,6 +126,7 @@ export function listChunks(params: {
   db: DatabaseSync;
   providerModel: string;
   sourceFilter: { sql: string; params: SearchSource[] };
+  pathFilter?: PathFilter;
 }): Array<{
   id: string;
   path: string;
@@ -106,13 +136,14 @@ export function listChunks(params: {
   embedding: number[];
   source: SearchSource;
 }> {
+  const pf = params.pathFilter;
   const rows = params.db
     .prepare(
       `SELECT id, path, start_line, end_line, text, embedding, source\n` +
         `  FROM chunks\n` +
-        ` WHERE model = ?${params.sourceFilter.sql}`,
+        ` WHERE model = ?${params.sourceFilter.sql}${pf?.sql ?? ""}`,
     )
-    .all(params.providerModel, ...params.sourceFilter.params) as Array<{
+    .all(params.providerModel, ...params.sourceFilter.params, ...(pf?.params ?? [])) as Array<{
     id: string;
     path: string;
     start_line: number;
@@ -141,6 +172,7 @@ export async function searchKeyword(params: {
   limit: number;
   snippetMaxChars: number;
   sourceFilter: { sql: string; params: SearchSource[] };
+  pathFilter?: PathFilter;
   buildFtsQuery: (raw: string) => string | null;
   bm25RankToScore: (rank: number) => number;
 }): Promise<Array<SearchRowResult & { textScore: number }>> {
@@ -152,16 +184,17 @@ export async function searchKeyword(params: {
     return [];
   }
 
+  const pf = params.pathFilter;
   const rows = params.db
     .prepare(
       `SELECT id, path, source, start_line, end_line, text,\n` +
         `       bm25(${params.ftsTable}) AS rank\n` +
         `  FROM ${params.ftsTable}\n` +
-        ` WHERE ${params.ftsTable} MATCH ? AND model = ?${params.sourceFilter.sql}\n` +
+        ` WHERE ${params.ftsTable} MATCH ? AND model = ?${params.sourceFilter.sql}${pf?.sql ?? ""}\n` +
         ` ORDER BY rank ASC\n` +
         ` LIMIT ?`,
     )
-    .all(ftsQuery, params.providerModel, ...params.sourceFilter.params, params.limit) as Array<{
+    .all(ftsQuery, params.providerModel, ...params.sourceFilter.params, ...(pf?.params ?? []), params.limit) as Array<{
     id: string;
     path: string;
     source: SearchSource;

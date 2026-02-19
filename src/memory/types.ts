@@ -1,5 +1,43 @@
 export type MemorySource = "memory" | "sessions";
 
+export type MemorySearchScope = "channel" | "all-customers" | "global";
+
+export type ScopeResolution =
+  | { prefix: string; denied?: false; excludePrefixes?: string[] }
+  | { prefix?: undefined; denied: true };
+
+/**
+ * Resolve a scope + channelSlug into a path prefix for filtering search results.
+ * - `global` / undefined → no prefix (search everything)
+ * - `all-customers` → `memory/customers` (optionally excludes specific slugs)
+ * - `channel` + slug → `memory/customers/${slug}`
+ * - `channel` without slug → denied (fail-closed)
+ *
+ * @param excludeSlugs — slugs to exclude from all-customers scope
+ */
+export function resolveSearchPathPrefix(
+  scope: MemorySearchScope | undefined,
+  channelSlug: string | undefined,
+  excludeSlugs?: string[],
+): ScopeResolution | undefined {
+  if (!scope || scope === "global") return undefined;
+  if (scope === "all-customers") {
+    const excludePrefixes = excludeSlugs
+      ?.map((s) => s.replace(/[/\\]+/g, "/").replace(/^\/|\/$/g, ""))
+      .filter(Boolean)
+      .map((s) => `memory/customers/${s}`);
+    return {
+      prefix: "memory/customers",
+      ...(excludePrefixes?.length ? { excludePrefixes } : {}),
+    };
+  }
+  // scope === "channel"
+  if (!channelSlug) return { denied: true };
+  const slug = channelSlug.replace(/[/\\]+/g, "/").replace(/^\/|\/$/g, "");
+  if (!slug) return { denied: true };
+  return { prefix: `memory/customers/${slug}` };
+}
+
 export type MemorySearchResult = {
   path: string;
   startLine: number;
@@ -61,7 +99,13 @@ export type MemoryProviderStatus = {
 export interface MemorySearchManager {
   search(
     query: string,
-    opts?: { maxResults?: number; minScore?: number; sessionKey?: string },
+    opts?: {
+      maxResults?: number;
+      minScore?: number;
+      sessionKey?: string;
+      scope?: MemorySearchScope;
+      channelSlug?: string;
+    },
   ): Promise<MemorySearchResult[]>;
   readFile(params: {
     relPath: string;

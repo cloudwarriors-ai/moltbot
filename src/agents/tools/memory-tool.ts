@@ -1,7 +1,7 @@
 import { Type } from "@sinclair/typebox";
 import type { OpenClawConfig } from "../../config/config.js";
 import type { MemoryCitationsMode } from "../../config/types.memory.js";
-import type { MemorySearchResult } from "../../memory/types.js";
+import type { MemorySearchResult, MemorySearchScope } from "../../memory/types.js";
 import type { AnyAgentTool } from "./common.js";
 import { resolveMemoryBackendConfig } from "../../memory/backend-config.js";
 import { getMemorySearchManager } from "../../memory/index.js";
@@ -14,6 +14,7 @@ const MemorySearchSchema = Type.Object({
   query: Type.String(),
   maxResults: Type.Optional(Type.Number()),
   minScore: Type.Optional(Type.Number()),
+  scope: Type.Optional(Type.String({ description: "Search scope: 'channel' (current customer only), 'all-customers', or 'global' (default)" })),
 });
 
 const MemoryGetSchema = Type.Object({
@@ -22,9 +23,53 @@ const MemoryGetSchema = Type.Object({
   lines: Type.Optional(Type.Number()),
 });
 
+const VALID_SCOPES = new Set<MemorySearchScope>(["channel", "all-customers", "global"]);
+
+function parseScope(raw: string | undefined): MemorySearchScope | undefined {
+  if (!raw) return undefined;
+  const trimmed = raw.trim().toLowerCase() as MemorySearchScope;
+  return VALID_SCOPES.has(trimmed) ? trimmed : undefined;
+}
+
+/**
+ * Compute the effective scope given the requested scope and policy options.
+ * Returns the effective scope and whether the request was downgraded.
+ */
+function resolveEffectiveScope(params: {
+  requested?: MemorySearchScope;
+  defaultScope?: MemorySearchScope;
+  isSupport?: boolean;
+  allowAllCustomers?: boolean;
+  channelSlug?: string;
+}): { effectiveScope: MemorySearchScope; scopeDenied: boolean } {
+  const raw = params.requested ?? params.defaultScope ?? "global";
+
+  // Non-support sessions cannot use channel/all-customers scopes
+  if (!params.isSupport && (raw === "channel" || raw === "all-customers")) {
+    return { effectiveScope: "global", scopeDenied: false };
+  }
+
+  // Support sessions with allowAllCustomers=false cannot use all-customers
+  if (raw === "all-customers" && !params.allowAllCustomers) {
+    return { effectiveScope: "channel", scopeDenied: !params.channelSlug };
+  }
+
+  // Channel scope without slug = fail-closed
+  if (raw === "channel" && !params.channelSlug) {
+    return { effectiveScope: "channel", scopeDenied: true };
+  }
+
+  return { effectiveScope: raw, scopeDenied: false };
+}
+
 export function createMemorySearchTool(options: {
   config?: OpenClawConfig;
   agentSessionKey?: string;
+  channelSlug?: string;
+  isSupport?: boolean;
+  defaultScope?: MemorySearchScope;
+  allowAllCustomers?: boolean;
+  excludeSlugs?: string[];
 }): AnyAgentTool | null {
   const cfg = options.config;
   if (!cfg) {
@@ -41,12 +86,31 @@ export function createMemorySearchTool(options: {
     label: "Memory Search",
     name: "memory_search",
     description:
-      "Mandatory recall step: semantically search MEMORY.md + memory/*.md (and optional session transcripts) before answering questions about prior work, decisions, dates, people, preferences, or todos; returns top snippets with path + lines.",
+      "Mandatory recall step: semantically search MEMORY.md + memory/*.md (and optional session transcripts) before answering questions about prior work, decisions, dates, people, preferences, or todos; returns top snippets with path + lines." +
+      (options.isSupport ? " Supports scope parameter: 'channel' (current customer), 'all-customers', or 'global'." : ""),
     parameters: MemorySearchSchema,
     execute: async (_toolCallId, params) => {
       const query = readStringParam(params, "query", { required: true });
       const maxResults = readNumberParam(params, "maxResults");
       const minScore = readNumberParam(params, "minScore");
+      const requestedScope = parseScope(readStringParam(params, "scope"));
+      const { effectiveScope, scopeDenied } = resolveEffectiveScope({
+        requested: requestedScope,
+        defaultScope: options.defaultScope,
+        isSupport: options.isSupport,
+        allowAllCustomers: options.allowAllCustomers,
+        channelSlug: options.channelSlug,
+      });
+
+      if (scopeDenied) {
+        return jsonResult({
+          results: [],
+          effectiveScope,
+          requestedScope: requestedScope ?? options.defaultScope ?? "global",
+          scopeDenied: true,
+        });
+      }
+
       const { manager, error } = await getMemorySearchManager({
         cfg,
         agentId,
@@ -64,6 +128,9 @@ export function createMemorySearchTool(options: {
           maxResults,
           minScore,
           sessionKey: options.agentSessionKey,
+          scope: effectiveScope,
+          channelSlug: options.channelSlug,
+          excludeSlugs: effectiveScope === "all-customers" ? options.excludeSlugs : undefined,
         });
         const status = manager.status();
         const decorated = decorateCitations(rawResults, includeCitations);
@@ -78,6 +145,9 @@ export function createMemorySearchTool(options: {
           model: status.model,
           fallback: status.fallback,
           citations: citationsMode,
+          effectiveScope,
+          requestedScope: requestedScope ?? options.defaultScope ?? "global",
+          scopeDenied: false,
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);

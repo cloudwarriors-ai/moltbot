@@ -22,7 +22,7 @@
       },
       "project": {
         "type": "string",
-        "default": "moltbot",
+        "default": "cwbot",
         "description": "Project name for scoping observations in the memory database"
       }
     }

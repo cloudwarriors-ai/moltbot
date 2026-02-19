@@ -61,6 +61,16 @@ export function createOpenClawTools(options?: {
   requireExplicitMessageTarget?: boolean;
   /** If true, omit the message tool from the tool list. */
   disableMessageTool?: boolean;
+  /** Channel slug for scoped memory search (support contexts). */
+  channelSlug?: string;
+  /** True when this is a support/observe session. */
+  isSupport?: boolean;
+  /** Default memory search scope for this session. */
+  defaultMemoryScope?: import("../memory/types.js").MemorySearchScope;
+  /** Whether all-customers scope is allowed (cross-channel training). */
+  allowAllCustomersMemoryScope?: boolean;
+  /** Slugs to exclude from all-customers memory scope. */
+  excludeMemorySlugs?: string[];
 }): AnyAgentTool[] {
   const workspaceDir = resolveWorkspaceRoot(options?.workspaceDir);
   const imageTool = options?.agentDir?.trim()
@@ -173,6 +183,11 @@ export function createOpenClawTools(options?: {
       messageChannel: options?.agentChannel,
       agentAccountId: options?.agentAccountId,
       sandboxed: options?.sandboxed,
+      channelSlug: options?.channelSlug,
+      isSupport: options?.isSupport,
+      defaultMemoryScope: options?.defaultMemoryScope,
+      allowAllCustomersMemoryScope: options?.allowAllCustomersMemoryScope,
+      excludeMemorySlugs: options?.excludeMemorySlugs,
     },
     existingToolNames: new Set(tools.map((tool) => tool.name)),
     toolAllowlist: options?.pluginToolAllowlist,

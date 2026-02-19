@@ -9,9 +9,11 @@ import type {
   MemoryProviderStatus,
   MemorySearchManager,
   MemorySearchResult,
+  MemorySearchScope,
   MemorySource,
   MemorySyncProgressUpdate,
 } from "./types.js";
+import { resolveSearchPathPrefix } from "./types.js";
 import { resolveAgentWorkspaceDir } from "../agents/agent-scope.js";
 import { resolveStateDir } from "../config/paths.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
@@ -308,21 +310,29 @@ export class QmdMemoryManager implements MemorySearchManager {
 
   async search(
     query: string,
-    opts?: { maxResults?: number; minScore?: number; sessionKey?: string },
+    opts?: { maxResults?: number; minScore?: number; sessionKey?: string; scope?: MemorySearchScope; channelSlug?: string; excludeSlugs?: string[] },
   ): Promise<MemorySearchResult[]> {
     if (!this.isScopeAllowed(opts?.sessionKey)) {
       this.logScopeDenied(opts?.sessionKey);
       return [];
     }
+    // Resolve scope to a path prefix for post-filtering
+    const scopeRes = resolveSearchPathPrefix(opts?.scope, opts?.channelSlug, opts?.excludeSlugs);
+    if (scopeRes?.denied) {
+      return []; // fail-closed: channel scope without slug
+    }
+    const scopePrefix = scopeRes?.prefix;
     const trimmed = query.trim();
     if (!trimmed) {
       return [];
     }
     await this.waitForPendingUpdateBeforeSearch();
-    const limit = Math.min(
+    const requestedLimit = Math.min(
       this.qmd.limits.maxResults,
       opts?.maxResults ?? this.qmd.limits.maxResults,
     );
+    // Over-fetch 5x when scope filtering will discard non-matching results
+    const limit = scopePrefix ? Math.min(requestedLimit * 5, this.qmd.limits.maxResults) : requestedLimit;
     const collectionNames = this.listManagedCollectionNames();
     if (collectionNames.length === 0) {
       log.warn("qmd query skipped: no managed collections configured");
@@ -388,7 +398,18 @@ export class QmdMemoryManager implements MemorySearchManager {
         source: doc.source,
       });
     }
-    return this.clampResultsByInjectedChars(results.slice(0, limit));
+    let filtered = results;
+    if (scopePrefix) {
+      const normalized = scopePrefix.replace(/\/$/, "") + "/";
+      filtered = results.filter((r) => r.path.startsWith(normalized) || r.path === scopePrefix);
+    }
+    // Apply exclusion prefixes (cross-customer: exclude self + internal channels)
+    const excludePrefixes = scopeRes?.excludePrefixes;
+    if (excludePrefixes?.length) {
+      const normExcludes = excludePrefixes.map((p) => p.replace(/\/$/, "") + "/");
+      filtered = filtered.filter((r) => !normExcludes.some((ex) => r.path.startsWith(ex)));
+    }
+    return this.clampResultsByInjectedChars(filtered.slice(0, requestedLimit));
   }
 
   async sync(params?: {

@@ -62,6 +62,24 @@ interface AgentTool {
   execute: (toolCallId: string, params: Record<string, unknown>) => Promise<AgentToolResult>;
 }
 
+interface PluginToolContext {
+  config?: Record<string, unknown>;
+  workspaceDir?: string;
+  agentDir?: string;
+  agentId?: string;
+  sessionKey?: string;
+  messageChannel?: string;
+  agentAccountId?: string;
+  sandboxed?: boolean;
+  channelSlug?: string;
+  isSupport?: boolean;
+  defaultMemoryScope?: string;
+  allowAllCustomersMemoryScope?: boolean;
+  excludeMemorySlugs?: string[];
+}
+
+type PluginToolFactory = (ctx: PluginToolContext) => AgentTool | AgentTool[] | null | undefined;
+
 interface OpenClawPluginApi {
   id: string;
   name: string;
@@ -70,7 +88,7 @@ interface OpenClawPluginApi {
   config: Record<string, unknown>;
   pluginConfig?: Record<string, unknown>;
   logger: PluginLogger;
-  registerTool: (tool: AgentTool, opts?: { optional?: boolean }) => void;
+  registerTool: (tool: AgentTool | PluginToolFactory, opts?: { optional?: boolean; names?: string[] }) => void;
   registerService: (service: {
     id: string;
     start: (ctx: PluginServiceContext) => void | Promise<void>;
@@ -93,6 +111,10 @@ interface OpenClawPluginApi {
       ((event: "gateway_start", callback: EventCallback<Record<string, never>>) => void);
   runtime: {
     channel: Record<string, Record<string, (...args: unknown[]) => Promise<unknown>>>;
+    tools?: {
+      createMemorySearchTool?: (opts: Record<string, unknown>) => AgentTool | null;
+      createMemoryGetTool?: (opts: Record<string, unknown>) => AgentTool | null;
+    };
   };
 }
 
@@ -291,8 +313,7 @@ export default function claudeMemPlugin(api: OpenClawPluginApi): void {
   const workerPort = userConfig.workerPort || DEFAULT_WORKER_PORT;
   const baseProjectName = userConfig.project || "openclaw";
 
-  function getProjectName(ctx: EventContext): string {
-    if (ctx.agentId) return `openclaw-${ctx.agentId}`;
+  function getProjectName(_ctx: EventContext): string {
     return baseProjectName;
   }
 
@@ -508,15 +529,47 @@ export default function claudeMemPlugin(api: OpenClawPluginApi): void {
   });
 
   // ------------------------------------------------------------------
-  // Tools: memory search & save exposed to agents
+  // Delegated core tools: memory_search and memory_get
+  // These use the core scoped-retrieval engine over memory/customers/**
+  // and inherit scope policy from the plugin tool context.
+  // ------------------------------------------------------------------
+
+  api.registerTool((ctx) => {
+    const tools: AgentTool[] = [];
+    const createSearch = api.runtime?.tools?.createMemorySearchTool;
+    const createGet = api.runtime?.tools?.createMemoryGetTool;
+    if (createSearch) {
+      const searchTool = createSearch({
+        config: ctx.config as Record<string, unknown>,
+        agentSessionKey: ctx.sessionKey,
+        channelSlug: ctx.channelSlug,
+        isSupport: ctx.isSupport,
+        defaultScope: ctx.defaultMemoryScope,
+        allowAllCustomers: ctx.allowAllCustomersMemoryScope,
+        excludeSlugs: ctx.excludeMemorySlugs,
+      });
+      if (searchTool) tools.push(searchTool as unknown as AgentTool);
+    }
+    if (createGet) {
+      const getTool = createGet({
+        config: ctx.config as Record<string, unknown>,
+        agentSessionKey: ctx.sessionKey,
+      });
+      if (getTool) tools.push(getTool as unknown as AgentTool);
+    }
+    return tools.length > 0 ? tools : null;
+  }, { names: ["memory_search", "memory_get"] });
+
+  // ------------------------------------------------------------------
+  // Debug/telemetry tools: obs_search, obs_save (observation layer)
   // ------------------------------------------------------------------
 
   api.registerTool({
-    name: "memory_search",
-    label: "Memory Search",
+    name: "obs_search",
+    label: "Observation Search",
     description:
-      "Search persistent memory for past observations, decisions, bugs fixed, features built, and session history. " +
-      "Use this before answering questions about prior work, past conversations, or project history. " +
+      "Search debug/telemetry observations from past tool calls, decisions, and session history. " +
+      "Use this for episodic debugging exploration, NOT for support/document retrieval (use memory_search for that). " +
       "Returns matching observations with IDs, titles, and summaries.",
     parameters: {
       type: "object",
@@ -538,33 +591,31 @@ export default function claudeMemPlugin(api: OpenClawPluginApi): void {
       if (type) qs.set("type", type);
       if (project) qs.set("project", project);
 
-      // Try timeline endpoint first (works without Chroma)
       const result = await workerGetText(workerPort, `/api/search/observations?${qs}`, api.logger);
       if (result) {
         return { content: [{ type: "text", text: result }] };
       }
 
-      // Fallback: try context inject
       const context = await workerGetText(workerPort, `/api/context/inject?projects=${project || baseProjectName}`, api.logger);
       if (context) {
-        return { content: [{ type: "text", text: `[Memory context — search unavailable, showing recent context]\n\n${context}` }] };
+        return { content: [{ type: "text", text: `[Observation context — search unavailable, showing recent context]\n\n${context}` }] };
       }
 
-      return { content: [{ type: "text", text: "Memory search unavailable — worker may still be initializing." }] };
+      return { content: [{ type: "text", text: "Observation search unavailable — worker may still be initializing." }] };
     },
-  });
+  }, { optional: true });
 
   api.registerTool({
-    name: "memory_save",
-    label: "Save Memory",
+    name: "obs_save",
+    label: "Save Observation",
     description:
-      "Manually save an important observation, decision, or fact to persistent memory. " +
+      "Manually save a debug observation, decision, or fact to the telemetry layer. " +
       "Use this when you learn something important that should be remembered across sessions.",
     parameters: {
       type: "object",
       properties: {
         text: { type: "string", description: "The information to save" },
-        title: { type: "string", description: "Short title for the memory" },
+        title: { type: "string", description: "Short title for the observation" },
         type: { type: "string", description: "Type: bugfix, feature, refactor, discovery, decision, change" },
       },
       required: ["text"],
@@ -582,17 +633,17 @@ export default function claudeMemPlugin(api: OpenClawPluginApi): void {
       }, api.logger);
 
       if (result) {
-        return { content: [{ type: "text", text: `Memory saved: ${title || "(untitled)"}` }] };
+        return { content: [{ type: "text", text: `Observation saved: ${title || "(untitled)"}` }] };
       }
-      return { content: [{ type: "text", text: "Failed to save memory — worker may be unavailable." }] };
+      return { content: [{ type: "text", text: "Failed to save observation — worker may be unavailable." }] };
     },
-  });
+  }, { optional: true });
 
   api.registerTool({
-    name: "memory_get_observations",
+    name: "obs_get",
     label: "Get Observations",
     description:
-      "Fetch full observation details by IDs. Use after memory_search to get complete details " +
+      "Fetch full observation details by IDs. Use after obs_search to get complete details " +
       "for specific observations. Always batch multiple IDs in a single call.",
     parameters: {
       type: "object",
@@ -600,7 +651,7 @@ export default function claudeMemPlugin(api: OpenClawPluginApi): void {
         ids: {
           type: "array",
           items: { type: "number" },
-          description: "Array of observation IDs to fetch (from memory_search results)",
+          description: "Array of observation IDs to fetch (from obs_search results)",
         },
       },
       required: ["ids"],
@@ -616,11 +667,11 @@ export default function claudeMemPlugin(api: OpenClawPluginApi): void {
       }
       return { content: [{ type: "text", text: "Failed to fetch observations — worker may be unavailable." }] };
     },
-  });
+  }, { optional: true });
 
   api.registerTool({
-    name: "memory_timeline",
-    label: "Memory Timeline",
+    name: "obs_timeline",
+    label: "Observation Timeline",
     description:
       "Get chronological context around a specific observation or time period. " +
       "Use this to understand what was happening around a specific event or date.",
@@ -642,7 +693,7 @@ export default function claudeMemPlugin(api: OpenClawPluginApi): void {
       }
       return { content: [{ type: "text", text: "Timeline unavailable — worker may still be initializing." }] };
     },
-  });
+  }, { optional: true });
 
-  api.logger.info(`[claude-mem] OpenClaw plugin loaded — v1.0.0 (worker: 127.0.0.1:${workerPort})`);
+  api.logger.info(`[claude-mem] OpenClaw plugin loaded — v1.1.0 (worker: 127.0.0.1:${workerPort})`);
 }

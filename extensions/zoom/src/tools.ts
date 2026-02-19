@@ -1,7 +1,10 @@
+import fs from "node:fs";
+import path from "node:path";
 import { Type } from "@sinclair/typebox";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 
 import { storePendingShare } from "./pending-shares.js";
+import { PREFILTER_CONFIG_PATH, DEFAULT_SYSTEM_PROMPT, DEFAULT_MODEL, readPrefilterConfig } from "./prefilter.js";
 import type { ZoomBodyItem, ZoomConfig } from "./types.js";
 import { createUploadToken } from "./upload-tokens.js";
 
@@ -302,6 +305,162 @@ export function registerZoomTools(api: OpenClawPluginApi) {
               text: JSON.stringify({ ok: true, uploadUrl, token }),
             },
           ],
+        };
+      },
+    };
+  });
+
+  // zoom_get_prefilter_config - read the current prefilter classification prompt
+  api.registerTool(() => ({
+    name: "zoom_get_prefilter_config",
+    description:
+      "Get the current prefilter config that controls how the bot classifies channel messages " +
+      "as RESPOND or SKIP in observe mode. Returns the system prompt and model. " +
+      "Changes to this config take effect immediately without restarting.",
+    parameters: Type.Object({}),
+    async execute() {
+      const config = readPrefilterConfig();
+      return {
+        content: [{
+          type: "text" as const,
+          text: JSON.stringify({
+            ok: true,
+            configPath: PREFILTER_CONFIG_PATH,
+            systemPrompt: config.systemPrompt,
+            model: config.model ?? process.env.ZOOM_PREFILTER_MODEL ?? DEFAULT_MODEL,
+            isDefault: config.systemPrompt === DEFAULT_SYSTEM_PROMPT,
+          }),
+        }],
+      };
+    },
+  }));
+
+  // zoom_set_prefilter_config - update the prefilter classification prompt
+  api.registerTool(() => ({
+    name: "zoom_set_prefilter_config",
+    description:
+      "Update the prefilter config that controls how the bot classifies channel messages " +
+      "in observe mode. Changes take effect immediately on the next message — no restart needed. " +
+      "The prompt should instruct the classifier to reply with exactly RESPOND or SKIP.",
+    parameters: Type.Object({
+      system_prompt: Type.String({ description: "The new system prompt for message classification" }),
+      model: Type.Optional(Type.String({ description: "Override the LLM model (default: anthropic/claude-haiku-4.5)" })),
+    }),
+    async execute(_id: string, params: Record<string, unknown>) {
+      try {
+        const config: Record<string, unknown> = {
+          systemPrompt: params.system_prompt as string,
+        };
+        if (params.model) config.model = params.model as string;
+
+        fs.writeFileSync(PREFILTER_CONFIG_PATH, JSON.stringify(config, null, 2) + "\n", "utf-8");
+
+        return {
+          content: [{
+            type: "text" as const,
+            text: JSON.stringify({ ok: true, message: "Prefilter config updated. Changes take effect on the next message." }),
+          }],
+        };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify({ ok: false, error: message }) }],
+        };
+      }
+    },
+  }));
+
+  // docx_read - read paragraphs from a DOCX file
+  api.registerTool((ctx) => {
+    if (ctx.messageChannel !== "zoom") return null;
+    return {
+      name: "docx_read",
+      description:
+        "Read the text content of a DOCX file that was uploaded via Zoom. " +
+        "Returns an array of paragraphs with their index, text, and style.",
+      parameters: Type.Object({
+        file_path: Type.String({ description: "Absolute path to the .docx file" }),
+      }),
+      async execute(_id: string, params: Record<string, unknown>) {
+        const filePath = params.file_path as string;
+        if (!fs.existsSync(filePath)) {
+          return { content: [{ type: "text" as const, text: JSON.stringify({ ok: false, error: "File not found" }) }] };
+        }
+        const { readDocxParagraphs } = await import("./docx-tools.js");
+        const paragraphs = await readDocxParagraphs(filePath);
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify({ ok: true, paragraphs }) }],
+        };
+      },
+    };
+  });
+
+  // docx_replace - find and replace text in a DOCX file
+  api.registerTool((ctx) => {
+    if (ctx.messageChannel !== "zoom") return null;
+    return {
+      name: "docx_replace",
+      description:
+        "Find and replace text in a DOCX file while preserving formatting. " +
+        "Creates a modified copy. Use docx_get_download to get a download link for the result.",
+      parameters: Type.Object({
+        file_path: Type.String({ description: "Path to the source .docx file" }),
+        replacements: Type.Array(
+          Type.Object({
+            find: Type.String({ description: "Text to find" }),
+            replace: Type.String({ description: "Replacement text" }),
+          }),
+          { description: "Array of find/replace pairs" },
+        ),
+      }),
+      async execute(_id: string, params: Record<string, unknown>) {
+        const filePath = params.file_path as string;
+        if (!fs.existsSync(filePath)) {
+          return { content: [{ type: "text" as const, text: JSON.stringify({ ok: false, error: "File not found" }) }] };
+        }
+        const replacements = params.replacements as Array<{ find: string; replace: string }>;
+        const ext = path.extname(filePath);
+        const base = path.basename(filePath, ext);
+        const dir = path.dirname(filePath);
+        const destPath = path.join(dir, `${base}_modified${ext}`);
+
+        const { replaceInDocx } = await import("./docx-tools.js");
+        const result = await replaceInDocx(filePath, destPath, replacements);
+        return {
+          content: [{
+            type: "text" as const,
+            text: JSON.stringify({ ok: true, output_path: destPath, applied: result.applied, skipped: result.skipped }),
+          }],
+        };
+      },
+    };
+  });
+
+  // docx_get_download - get a download URL for a file in zoom-uploads
+  api.registerTool((ctx) => {
+    if (ctx.messageChannel !== "zoom") return null;
+    return {
+      name: "docx_get_download",
+      description:
+        "Get a public download URL for a file in the zoom-uploads directory. " +
+        "Use this after docx_replace to give the user a link to the modified file.",
+      parameters: Type.Object({
+        file_path: Type.String({ description: "Absolute path to the file" }),
+      }),
+      async execute(_id: string, params: Record<string, unknown>) {
+        const filePath = params.file_path as string;
+        const uploadDir = path.resolve(".data/zoom-uploads");
+        if (!filePath.startsWith(uploadDir) || !fs.existsSync(filePath)) {
+          return {
+            content: [{ type: "text" as const, text: JSON.stringify({ ok: false, error: "File not found or outside uploads directory" }) }],
+          };
+        }
+        const relative = path.relative(uploadDir, filePath);
+        const zoomCfg = api.config.channels?.zoom as ZoomConfig | undefined;
+        const publicUrl = zoomCfg?.publicUrl ?? "https://molty-dev.cloudwarriors.ai";
+        const downloadUrl = `${publicUrl}/zoom/uploads/${relative}`;
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify({ ok: true, download_url: downloadUrl }) }],
         };
       },
     };

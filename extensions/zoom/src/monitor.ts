@@ -74,8 +74,11 @@ export async function monitorZoomProvider(
     }),
   );
 
-  // Also add general JSON parser for other routes
-  expressApp.use(express.json());
+  // Also add general JSON parser for other routes (skip /zoom/file — has its own 15mb parser)
+  expressApp.use((req: Request, res: Response, next: () => void) => {
+    if (req.path === "/zoom/file") return next();
+    express.json()(req, res, next);
+  });
 
   const handleMessage = createZoomMessageHandler({
     cfg,

@@ -1,18 +1,61 @@
 import type { OpenClawConfig, RuntimeEnv, GroupPolicy } from "openclaw/plugin-sdk";
 
+import { scrubCrossChannelAnswer } from "./answer-scrub.js";
 import { persistApprovedQA, appendCustomerDetail } from "./channel-memory.js";
 import type { ZoomConversationStore } from "./conversation-store.js";
 import { formatUnknownError } from "./errors.js";
 import type { ZoomMonitorLogger } from "./monitor-types.js";
-import { getDynamicObservePolicy, enableObserveChannel, toggleObserveChannel, toggleSilentChannel, setReviewChannel } from "./observe-config.js";
+import { getDynamicObservePolicy, enableObserveChannel, toggleObserveChannel, toggleSilentChannel, setReviewChannel, setChannelMode, getObservedChannelsList, setCrossChannelTraining, getCrossChannelTraining } from "./observe-config.js";
+import type { ChannelMode, RedactionPolicy } from "./observe-config.js";
 import { getBlockedCallSet, getSessionBlockedTools, markToolsApproved, markSessionObserve, clearSessionObserve, formatToolParams } from "./observe-tool-gate.js";
 import { getPendingApproval, peekPendingApproval, storePendingApproval } from "./pending-approvals.js";
 import { getPendingShare } from "./pending-shares.js";
 import { consumeTrainingSession, storeTrainingSession } from "./pending-training.js";
 import { createUploadToken } from "./upload-tokens.js";
 import { isZoomGroupAllowed, resolveZoomAllowlistMatch, resolveZoomObservePolicy, resolveZoomReplyPolicy, resolveZoomRouteConfig } from "./policy.js";
+import { shouldRespond, savePrefilterExample } from "./prefilter.js";
 import type { ZoomConfig, ZoomCredentials, ZoomWebhookEvent } from "./types.js";
 import { getZoomRuntime } from "./runtime.js";
+
+/** In-memory roleplay personas for observe mode testing. Key: `${channelJid}::${userJid}` */
+const roleplayPersonas = new Map<string, string>();
+
+/** In-memory store for prefilter-blocked messages awaiting reviewer "Allow". */
+type PendingPrefilter = {
+  conversationId: string;
+  senderId: string;
+  senderName?: string;
+  text: string;
+  channelJid: string;
+  channelName?: string;
+  reviewChannelJid: string;
+  isThreadReply?: boolean;
+  silent?: boolean;
+  mode?: string;
+  roleplay?: boolean;
+  expiresAt: number;
+};
+const pendingPrefilterStore = new Map<string, PendingPrefilter>();
+let prefilterNextId = 1;
+function storePrefilterBlock(data: Omit<PendingPrefilter, "expiresAt">): string {
+  const id = `pf_${Date.now()}_${prefilterNextId++}`;
+  // Prune expired
+  const now = Date.now();
+  for (const [k, v] of pendingPrefilterStore) {
+    if (v.expiresAt <= now) pendingPrefilterStore.delete(k);
+  }
+  pendingPrefilterStore.set(id, { ...data, expiresAt: now + 2 * 60 * 60 * 1000 });
+  return id;
+}
+function consumePrefilterBlock(id: string): PendingPrefilter | undefined {
+  const entry = pendingPrefilterStore.get(id);
+  if (!entry || entry.expiresAt <= Date.now()) {
+    pendingPrefilterStore.delete(id);
+    return undefined;
+  }
+  pendingPrefilterStore.delete(id);
+  return entry;
+}
 
 export type ZoomMessageHandlerDeps = {
   cfg: OpenClawConfig;
@@ -46,12 +89,23 @@ function extractBotMention(params: {
 }
 
 /** Strip @mentions and extract a bare command name (e.g. "/observe" or "set-review-channel"). */
-function parseObserveCommand(text: string): "observe" | "set-review-channel" | "silent" | null {
+type ObserveCommandName = "observe" | "set-review-channel" | "silent" | "roleplay" | "cross-training";
+
+function parseObserveCommand(text: string): ObserveCommandName | null {
   const cleaned = text.replace(/@\S+/g, "").trim().toLowerCase();
   if (cleaned === "/observe" || cleaned === "observe") return "observe";
   if (cleaned === "/set-review-channel" || cleaned === "set-review-channel") return "set-review-channel";
   if (cleaned === "/silent" || cleaned === "silent") return "silent";
+  if (cleaned.startsWith("/roleplay") || cleaned.startsWith("roleplay")) return "roleplay";
+  if (/^\/cross-training\s+(on|off)$/.test(cleaned) || /^cross-training\s+(on|off)$/.test(cleaned)) return "cross-training";
   return null;
+}
+
+/** Parse the on/off argument from a cross-training command. */
+function parseCrossTrainingArg(text: string): boolean | null {
+  const match = text.replace(/@\S+/g, "").trim().toLowerCase().match(/cross-training\s+(on|off)/);
+  if (!match) return null;
+  return match[1] === "on";
 }
 
 const ADMIN_DOMAIN = process.env.ADMIN_DOMAIN?.toLowerCase().trim();
@@ -60,6 +114,18 @@ const ADMIN_DOMAIN = process.env.ADMIN_DOMAIN?.toLowerCase().trim();
 function isAdminSender(...identifiers: (string | undefined)[]): boolean {
   if (!ADMIN_DOMAIN) return true; // no domain configured = no restriction
   return identifiers.some((id) => id?.toLowerCase().includes(`@${ADMIN_DOMAIN}`));
+}
+
+/** Comma-separated list of admin user names or JIDs (for DM commands where email is unavailable). */
+const ADMIN_USERS = (process.env.ADMIN_USERS ?? "")
+  .split(",")
+  .map((s) => s.trim().toLowerCase())
+  .filter(Boolean);
+
+/** Check if a sender matches the ADMIN_USERS env var (case-insensitive). */
+function isAdminUser(...identifiers: (string | undefined)[]): boolean {
+  if (ADMIN_USERS.length === 0) return false;
+  return identifiers.some((id) => id && ADMIN_USERS.includes(id.toLowerCase()));
 }
 
 export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
@@ -209,6 +275,45 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
         return;
       }
 
+      if (botNotifCmd === "roleplay") {
+        const { sendZoomTextMessage } = await import("./send.js");
+        const rpArg = messageText.replace(/@\S+/g, "").trim().replace(/^\/?roleplay\s*/i, "").trim();
+        const rpKey = `${toJid}::${userJid}`;
+        if (!rpArg || rpArg.toLowerCase() === "off") {
+          roleplayPersonas.delete(rpKey);
+          await sendZoomTextMessage({ cfg, to: toJid, text: `Roleplay cleared for ${userName ?? userJid}. Back to normal.`, isChannel: true });
+        } else {
+          roleplayPersonas.set(rpKey, rpArg);
+          await sendZoomTextMessage({ cfg, to: toJid, text: `Roleplay active — ${userName ?? userJid} is now **${rpArg}** (external customer). Messages will bypass prefilter.`, isChannel: true });
+        }
+        return;
+      }
+
+      if (botNotifCmd === "cross-training") {
+        const { sendZoomTextMessage } = await import("./send.js");
+        const enabled = parseCrossTrainingArg(messageText);
+        if (enabled === null) {
+          await sendZoomTextMessage({ cfg, to: toJid, text: `Usage: \`/cross-training on\` or \`/cross-training off\``, isChannel: true });
+          return;
+        }
+        const result = await setCrossChannelTraining(toJid, enabled, userName ?? userJid);
+        if (!result.found) {
+          await sendZoomTextMessage({ cfg, to: toJid, text: `This channel is not in observe mode. Enable observe mode first with \`/observe\`.`, isChannel: true });
+        } else {
+          const redactionNote = enabled ? " Reply redaction (LLM) is enabled by default." : "";
+          await sendZoomTextMessage({
+            cfg,
+            to: toJid,
+            text: enabled
+              ? `Cross-channel training **enabled**. Memory search can now retrieve data from other customer channels.${redactionNote}`
+              : `Cross-channel training **disabled**. Memory search is restricted to this channel only.`,
+            isChannel: true,
+          });
+          log.info(`cross-training toggled: channel=${toJid} enabled=${enabled} actor=${userName ?? userJid}`);
+        }
+        return;
+      }
+
       // Store channel conversation reference
       await conversationStore.upsert(toJid, {
         channelJid: toJid,
@@ -218,7 +323,32 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
         conversationType: "channel",
       });
 
-      // Route to agent with channel context
+      // Check observe mode — if enabled, route through the observe pipeline (with prefilter)
+      const botNotifRouteConfig = resolveZoomRouteConfig({ cfg: zoomCfg, channelJid: toJid, channelName });
+      const botNotifStaticObserve = resolveZoomObservePolicy({ channelConfig: botNotifRouteConfig.channelConfig });
+      const botNotifDynamicObserve = await getDynamicObservePolicy(toJid);
+      const botNotifObserveMode = botNotifStaticObserve.observeMode || botNotifDynamicObserve.observeMode;
+      const botNotifReviewJid = botNotifStaticObserve.reviewChannelJid ?? botNotifDynamicObserve.reviewChannelJid;
+
+      if (botNotifObserveMode && botNotifReviewJid) {
+        const botNotifMode = botNotifDynamicObserve.mode ?? (botNotifDynamicObserve.silent ? "silent" : "active");
+        const rpPersona = roleplayPersonas.get(`${toJid}::${userJid}`);
+        await routeToAgentWithObserve({
+          conversationId: toJid,
+          senderId: userJid,
+          senderName: rpPersona ?? userName,
+          text: messageText,
+          channelJid: toJid,
+          channelName,
+          reviewChannelJid: botNotifReviewJid,
+          silent: botNotifMode === "silent",
+          mode: botNotifMode,
+          roleplay: Boolean(rpPersona),
+        });
+        return;
+      }
+
+      // Route to agent with channel context (non-observe)
       await routeToAgent({
         conversationId: toJid,
         senderId: userJid,
@@ -230,6 +360,50 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
         channelName,
       });
     } else {
+      // Handle /channel-mode DM command (admin-only)
+      const channelModeMatch = messageText.trim().match(/^\/channel-mode\s+(.+?)\s+(active|silent|training)$/i);
+      if (channelModeMatch) {
+        const { sendZoomTextMessage } = await import("./send.js");
+        if (!isAdminSender(userName, userEmail, userJid) && !isAdminUser(userName, userJid)) {
+          await sendZoomTextMessage({ cfg, to: userJid, text: "Sorry, this command is restricted to admins.", isChannel: false });
+          return;
+        }
+
+        const searchName = channelModeMatch[1].toLowerCase();
+        const newMode = channelModeMatch[2].toLowerCase() as ChannelMode;
+        const channels = await getObservedChannelsList();
+
+        // Fuzzy match: case-insensitive partial match on channelName
+        const match = channels.find((ch) =>
+          ch.channelName?.toLowerCase().includes(searchName),
+        );
+
+        if (!match) {
+          const available = channels.map((ch) => ch.channelName ?? ch.channelJid).join(", ");
+          await sendZoomTextMessage({
+            cfg,
+            to: userJid,
+            text: `No observed channel matching "${channelModeMatch[1]}". Observed channels: ${available || "(none)"}`,
+            isChannel: false,
+          });
+          return;
+        }
+
+        const result = await setChannelMode(match.channelJid, newMode);
+        if (!result.found) {
+          await sendZoomTextMessage({ cfg, to: userJid, text: `Channel "${match.channelName}" is no longer observed.`, isChannel: false });
+          return;
+        }
+
+        await sendZoomTextMessage({
+          cfg,
+          to: userJid,
+          text: `Mode for **${match.channelName}** set to **${newMode}**.`,
+          isChannel: false,
+        });
+        return;
+      }
+
       // Check training session FIRST — training feedback bypasses DM allowlist
       // (the user already proved authorization by clicking Train in the review channel)
       const training = consumeTrainingSession(userJid);
@@ -299,6 +473,37 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
     }
 
     log.info("handling button action", { userJid, value: value.slice(0, 80) });
+
+    // Handle prefilter allow — re-process the blocked message through observe pipeline
+    if (value.startsWith("prefilter_allow:")) {
+      const refId = value.slice("prefilter_allow:".length);
+      const pending = consumePrefilterBlock(refId);
+      const { sendZoomTextMessage } = await import("./send.js");
+      if (!pending) {
+        await sendZoomTextMessage({ cfg, to: userJid, text: "This filtered message has expired.", isChannel: false });
+        return;
+      }
+      log.info("prefilter override: allowing blocked message", { channelJid: pending.channelJid, text: pending.text.slice(0, 80) });
+      // Train: save as RESPOND example so future similar messages are allowed
+      savePrefilterExample(pending.text, "RESPOND", pending.channelName);
+      // Re-route with skipFilter=true to bypass both prefilter and NO_RESPONSE drop
+      await routeToAgentWithObserve({
+        ...pending,
+        skipFilter: true,
+      });
+      return;
+    }
+
+    // Handle prefilter dismiss — train as SKIP and acknowledge
+    if (value.startsWith("prefilter_dismiss:")) {
+      const refId = value.slice("prefilter_dismiss:".length);
+      const pending = pendingPrefilterStore.get(refId);
+      if (pending) {
+        savePrefilterExample(pending.text, "SKIP", pending.channelName);
+      }
+      pendingPrefilterStore.delete(refId);
+      return;
+    }
 
     // Handle share-to-channel directly (no LLM round-trip)
     if (value.startsWith("share_to_channel:")) {
@@ -971,6 +1176,20 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
       return;
     }
 
+    if (channelCmd === "roleplay") {
+      const { sendZoomTextMessage } = await import("./send.js");
+      const rpArg = messageText.replace(/@\S+/g, "").trim().replace(/^\/?roleplay\s*/i, "").trim();
+      const rpKey = `${channelJid}::${senderId}`;
+      if (!rpArg || rpArg.toLowerCase() === "off") {
+        roleplayPersonas.delete(rpKey);
+        await sendZoomTextMessage({ cfg, to: channelJid, text: `Roleplay cleared for ${senderName ?? senderId}. Back to normal.`, isChannel: true });
+      } else {
+        roleplayPersonas.set(rpKey, rpArg);
+        await sendZoomTextMessage({ cfg, to: channelJid, text: `Roleplay active — ${senderName ?? senderId} is now **${rpArg}** (external customer). Messages will bypass prefilter.`, isChannel: true });
+      }
+      return;
+    }
+
     // Resolve per-channel config and check observe mode before group policy
     // (observe mode allows all senders — it watches the whole channel)
     const routeConfig = resolveZoomRouteConfig({ cfg: zoomCfg, channelJid, channelName });
@@ -981,7 +1200,7 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
     const dynamicObservePolicy = await getDynamicObservePolicy(channelJid);
     const observeMode = staticObservePolicy.observeMode || dynamicObservePolicy.observeMode;
     const reviewChannelJid = staticObservePolicy.reviewChannelJid ?? dynamicObservePolicy.reviewChannelJid;
-    const observeSilent = dynamicObservePolicy.silent === true;
+    const observeChannelMode = dynamicObservePolicy.mode ?? (dynamicObservePolicy.silent ? "silent" : "active");
 
     if (observeMode && reviewChannelJid) {
       // Store conversation reference
@@ -994,16 +1213,19 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
         lastMessageId: messageId,
       });
 
+      const rpPersona = roleplayPersonas.get(`${channelJid}::${senderId}`);
       await routeToAgentWithObserve({
         conversationId: channelJid,
         senderId,
-        senderName,
+        senderName: rpPersona ?? senderName,
         text: messageText.trim(),
         channelJid,
         channelName,
         reviewChannelJid,
         isThreadReply: Boolean(replyMainMessageId),
-        silent: observeSilent,
+        silent: observeChannelMode === "silent",
+        mode: observeChannelMode,
+        roleplay: Boolean(rpPersona),
       });
       return;
     }
@@ -1279,14 +1501,53 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
     reviewChannelJid: string;
     isThreadReply?: boolean;
     silent?: boolean;
+    mode?: ChannelMode;
+    roleplay?: boolean;
+    skipFilter?: boolean;
   }) {
-    const { conversationId, senderId, senderName, text, channelJid, channelName, reviewChannelJid, isThreadReply, silent } = params;
+    const { conversationId, senderId, senderName, text, channelJid, channelName, reviewChannelJid, isThreadReply, silent, mode = "active", roleplay, skipFilter } = params;
 
     try {
-      log.debug("routing to agent with observe mode", { conversationId, channelJid, isThreadReply, silent });
+      log.debug("routing to agent with observe mode", { conversationId, channelJid, isThreadReply, mode, roleplay });
 
-      // Immediate ack — skip in silent mode (no messages to observed channel)
-      if (!silent) {
+      // Pre-filter: classify message before sending ack.
+      // Thread replies, silent/training modes, roleplay, and reviewer-allowed messages bypass the filter.
+      if (!isThreadReply && mode === "active" && !roleplay && !skipFilter) {
+        const actionable = await shouldRespond(text);
+        if (!actionable) {
+          log.debug("prefilter blocked message, sending to review channel", { channelJid, text: text.slice(0, 80) });
+          // Store and send to review channel for manual override
+          const refId = storePrefilterBlock({
+            conversationId, senderId, senderName, text,
+            channelJid, channelName, reviewChannelJid,
+            isThreadReply, silent, mode, roleplay,
+          });
+          const { sendZoomActionMessage } = await import("./send.js");
+          await sendZoomActionMessage({
+            cfg,
+            to: reviewChannelJid,
+            headText: "Filtered Message",
+            body: [
+              {
+                type: "message",
+                text: `**${channelName ?? channelJid}** — ${senderName ?? senderId}:\n> ${text}\n\n_Pre-filter classified this as casual/non-actionable._`,
+              },
+              {
+                type: "actions",
+                items: [
+                  { text: "Allow", value: `prefilter_allow:${refId}`, style: "Primary" },
+                  { text: "Dismiss", value: `prefilter_dismiss:${refId}`, style: "Default" },
+                ],
+              },
+            ],
+            isChannel: true,
+          });
+          return;
+        }
+      }
+
+      // Immediate ack — skip in silent/training modes and roleplay (don't tip off channel)
+      if (mode === "active" && !roleplay) {
         const { sendZoomTextMessage } = await import("./send.js");
         const displayName = senderName?.split("@")[0]?.split(" ")[0] ?? "there";
         await sendZoomTextMessage({
@@ -1314,7 +1575,7 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
         senderName: senderName ?? senderId,
         senderJid: senderId,
         question: text,
-        silent,
+        silent: mode === "silent",
       });
 
       // Channel context hint for memory_search — tells agent which customer dir to search
@@ -1322,9 +1583,28 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
         .toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
       const memoryHint = `IMPORTANT: BEFORE answering, call memory_search with the user's question to find trained answers and customer context in memory/customers/${customerSlug}/. Trained answers from reviewers are highest priority — use them over your own knowledge.`;
 
+      // Scope context for deterministic memory_search scoping
+      const crossTraining = await getCrossChannelTraining(channelJid);
+      const allowAllCustomers = crossTraining.enabled;
+      // When cross-customer is enabled, exclude self + internal/test channels from results
+      const excludeSlugs = allowAllCustomers
+        ? [customerSlug, "test-customer", "zoomwarriors-support-channel"].filter(Boolean)
+        : undefined;
+      log.debug("observe scope context", { customerSlug, allowAllCustomers, excludeSlugs, redactionPolicy: crossTraining.redactionPolicy });
+
       // Thread replies are follow-ups to the bot's clarifying question — don't filter them.
       // New top-level messages get the observe wrapper to triage questions vs casual chat.
-      const body = isThreadReply
+      // Roleplay messages use a customer-oriented prompt (no [NO_RESPONSE] filtering).
+      const body = roleplay
+        ? [
+            "[CHANNEL OBSERVE — CUSTOMER MESSAGE] This is a message from an external customer. Answer it directly.",
+            memoryHint,
+            "Also call the relevant ZW2 tools to fetch fresh data when the question involves orders, pricing, or SOW.",
+            "If a write tool is blocked, do NOT retry it and do NOT mention 'pending approval' in your response. Just respond with [NO_RESPONSE].",
+            "Give a short, direct answer with the actual data. No filler, no preamble. Just the facts in 2-4 sentences, conversational tone.",
+            `Customer (${senderName}): ${text}`,
+          ].join("\n")
+        : isThreadReply
         ? [
             "[CHANNEL OBSERVE — FOLLOW-UP] The user replied to your clarifying question.",
             memoryHint,
@@ -1335,6 +1615,7 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
           ].join("\n")
         : [
             "[CHANNEL OBSERVE MODE] A user posted a message in a channel you are monitoring.",
+            "STEP 1 (MANDATORY): You MUST call memory_search with the user's message BEFORE doing anything else. Do NOT skip this step. Do NOT respond with [NO_RESPONSE] without calling memory_search first.",
             memoryHint,
             "Also call the relevant ZW2 tools to fetch fresh data when the question involves orders, pricing, or SOW.",
             "If a write tool is blocked, do NOT retry it and do NOT mention 'pending approval' in your response. Just respond with [NO_RESPONSE].",
@@ -1343,7 +1624,7 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
             "  [CUSTOMER_CONTEXT]",
             "  500 users",
             "  Using Microsoft Teams currently",
-            "If this is NOT a question AND NOT customer context (casual chat, greeting, acknowledgment, small talk), respond with exactly [NO_RESPONSE] and nothing else.",
+            "ONLY after calling memory_search: if the message is NOT a question AND NOT customer context (casual chat, greeting, acknowledgment, small talk), respond with exactly [NO_RESPONSE] and nothing else.",
             "If it IS a new question with no matching memory_search results, respond with ONE short clarifying question (1 sentence) to narrow down what they need.",
             `User message: ${text}`,
           ].join("\n");
@@ -1368,6 +1649,12 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
         CommandSource: "text" as const,
         OriginatingChannel: "zoom" as const,
         OriginatingTo: conversationId,
+        // Scoped memory search context
+        ChannelSlug: customerSlug,
+        IsSupport: true,
+        DefaultMemoryScope: "channel",
+        AllowAllCustomersMemoryScope: allowAllCustomers,
+        ExcludeMemorySlugs: excludeSlugs,
       });
 
       // Collect reply text instead of sending it directly
@@ -1441,9 +1728,35 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
 
       const fullReply = collectedParts.join("\n").trim();
 
-      // If no reply or agent signals not a question, silently drop
-      if (!fullReply || fullReply.includes("[NO_RESPONSE]")) {
-        log.debug("observe mode: not a question, dropping silently", { channelJid });
+      // If no reply or agent signals not a question, send to review channel for visibility
+      // skipFilter=true means a reviewer already allowed this message — post it directly
+      if (!skipFilter && (!fullReply || fullReply.includes("[NO_RESPONSE]"))) {
+        log.debug("observe mode: not a question, routing to review channel", { channelJid });
+        const refId = storePrefilterBlock({
+          conversationId, senderId, senderName, text,
+          channelJid, channelName, reviewChannelJid,
+          isThreadReply, silent, mode, roleplay,
+        });
+        const { sendZoomActionMessage } = await import("./send.js");
+        await sendZoomActionMessage({
+          cfg,
+          to: reviewChannelJid,
+          headText: "Agent Skipped",
+          body: [
+            {
+              type: "message",
+              text: `**${channelName ?? channelJid}** — ${senderName ?? senderId}:\n> ${text}\n\n_Agent returned NO\\_RESPONSE (decided message was not actionable after running)._`,
+            },
+            {
+              type: "actions",
+              items: [
+                { text: "Allow", value: `prefilter_allow:${refId}`, style: "Primary" },
+                { text: "Dismiss", value: `prefilter_dismiss:${refId}`, style: "Default" },
+              ],
+            },
+          ],
+          isChannel: true,
+        });
         return;
       }
 
@@ -1483,13 +1796,71 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
       }
 
       // Strip any stale tags the agent might emit
-      const cleanReply = fullReply
+      let cleanReply = fullReply
+        .replace(/\[NO_RESPONSE\]/gi, "")
         .replace(/\[TOOLS_USED\]\s*.*/i, "")
         .replace(/\[PROPOSED_ACTION\][\s\S]*/i, "")
         .trim();
-      if (!cleanReply) return;
+
+      // Optional cross-channel answer redaction
+      if (cleanReply && allowAllCustomers && crossTraining.redactionPolicy === "llm") {
+        try {
+          const scrubResult = await scrubCrossChannelAnswer({
+            answer: cleanReply,
+            sourceChannelSlug: customerSlug,
+            redactionPolicy: crossTraining.redactionPolicy,
+            crossChannelEnabled: allowAllCustomers,
+          });
+          if (scrubResult.scrubbed) {
+            cleanReply = scrubResult.text;
+            log.info("observe mode: answer scrubbed for cross-channel redaction", { channelJid });
+          }
+          if (scrubResult.error) {
+            log.warn("observe mode: scrub warning", { error: scrubResult.error });
+          }
+        } catch (scrubErr) {
+          log.warn("observe mode: scrub failed (fail-open)", { error: String(scrubErr) });
+        }
+      }
+
+      // If the LLM couldn't generate an answer (even after reviewer Allow), offer Train
+      if (!cleanReply) {
+        if (skipFilter) {
+          const trainRefId = storePendingApproval({
+            originalChannelJid: channelJid,
+            originalChannelName: channelName ?? channelJid,
+            originalSenderName: senderName ?? senderId,
+            originalSenderJid: senderId,
+            originalQuestion: text,
+            proposedAnswer: "(no answer generated)",
+            silent: mode === "silent",
+          });
+          const { sendZoomActionMessage } = await import("./send.js");
+          await sendZoomActionMessage({
+            cfg,
+            to: reviewChannelJid,
+            headText: "Training Needed",
+            body: [
+              {
+                type: "message",
+                text: `**${channelName ?? channelJid}** — ${senderName ?? senderId}:\n> ${text}\n\n_Bot couldn't generate an answer. Click Train to provide the correct response._`,
+              },
+              {
+                type: "actions",
+                items: [
+                  { text: "Train", value: `train_answer:${trainRefId}`, style: "Primary" },
+                  { text: "Dismiss", value: `reject_answer:${trainRefId}`, style: "Default" },
+                ],
+              },
+            ],
+            isChannel: true,
+          });
+        }
+        return;
+      }
 
       // Store pending approval and send review card (text-only responses)
+      // silent=true only for actual silent mode; training mode posts on approve
       const refId = storePendingApproval({
         originalChannelJid: channelJid,
         originalChannelName: channelName ?? channelJid,
@@ -1497,7 +1868,7 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
         originalSenderJid: senderId,
         originalQuestion: text,
         proposedAnswer: cleanReply,
-        silent,
+        silent: mode === "silent",
       });
 
       const { sendZoomActionMessage } = await import("./send.js");

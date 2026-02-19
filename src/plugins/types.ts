@@ -63,6 +63,11 @@ export type OpenClawPluginToolContext = {
   messageChannel?: string;
   agentAccountId?: string;
   sandboxed?: boolean;
+  channelSlug?: string;
+  isSupport?: boolean;
+  defaultMemoryScope?: import("../memory/types.js").MemorySearchScope;
+  allowAllCustomersMemoryScope?: boolean;
+  excludeMemorySlugs?: string[];
 };
 
 export type OpenClawPluginToolFactory = (

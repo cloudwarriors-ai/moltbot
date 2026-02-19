@@ -104,4 +104,14 @@ export type RunEmbeddedPiAgentParams = {
   streamParams?: AgentStreamParams;
   ownerNumbers?: string[];
   enforceFinalTag?: boolean;
+  /** Channel slug for scoped memory search (support contexts). */
+  channelSlug?: string;
+  /** True when this is a support/observe session. */
+  isSupport?: boolean;
+  /** Default memory search scope for this session. */
+  defaultMemoryScope?: import("../../../memory/types.js").MemorySearchScope;
+  /** Whether all-customers scope is allowed (cross-channel training). */
+  allowAllCustomersMemoryScope?: boolean;
+  /** Slugs to exclude from all-customers memory scope. */
+  excludeMemorySlugs?: string[];
 };

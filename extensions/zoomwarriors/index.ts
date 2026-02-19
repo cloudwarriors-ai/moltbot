@@ -142,6 +142,26 @@ const plugin = {
   configSchema: emptyPluginConfigSchema(),
 
   register(api: OpenClawPluginApi) {
+    // Tool 0: Force-refresh auth token
+    api.registerTool(() => ({
+      name: "zw2_refresh_auth",
+      description:
+        "Force-refresh the ZW2 API authentication token and verify it works. " +
+        "Use this if ZW2 tool calls are failing with auth errors.",
+      parameters: Type.Object({}),
+      async execute() {
+        try {
+          const { zw2ForceReauth } = await import("./zw2-auth.js");
+          const result = await zw2ForceReauth();
+          return result.success
+            ? { content: [{ type: "text" as const, text: "ZW2 auth token refreshed and verified successfully." }] }
+            : { content: [{ type: "text" as const, text: `ZW2 auth refresh failed: ${result.error}` }] };
+        } catch (err) {
+          return errorResult(err);
+        }
+      },
+    }));
+
     // Tool 1: Search orders (API search + local company_name cache)
     api.registerTool(() => ({
       name: "zw2_search_orders",

@@ -3,6 +3,7 @@ import type { ResolvedQmdConfig } from "./backend-config.js";
 import type {
   MemoryEmbeddingProbeResult,
   MemorySearchManager,
+  MemorySearchScope,
   MemorySyncProgressUpdate,
 } from "./types.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
@@ -88,7 +89,7 @@ class FallbackMemoryManager implements MemorySearchManager {
 
   async search(
     query: string,
-    opts?: { maxResults?: number; minScore?: number; sessionKey?: string },
+    opts?: { maxResults?: number; minScore?: number; sessionKey?: string; scope?: MemorySearchScope; channelSlug?: string; excludeSlugs?: string[] },
   ) {
     if (!this.primaryFailed) {
       try {

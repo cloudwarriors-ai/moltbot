@@ -432,6 +432,11 @@ export async function runPreparedReply(
       ownerNumbers: command.ownerList.length > 0 ? command.ownerList : undefined,
       extraSystemPrompt: extraSystemPrompt || undefined,
       ...(isReasoningTagProvider(provider) ? { enforceFinalTag: true } : {}),
+      channelSlug: sessionCtx.ChannelSlug || undefined,
+      isSupport: sessionCtx.IsSupport || undefined,
+      defaultMemoryScope: (sessionCtx.DefaultMemoryScope as import("../../memory/types.js").MemorySearchScope) || undefined,
+      allowAllCustomersMemoryScope: sessionCtx.AllowAllCustomersMemoryScope || undefined,
+      excludeMemorySlugs: sessionCtx.ExcludeMemorySlugs,
     },
   };
 

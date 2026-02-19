@@ -80,6 +80,19 @@ export async function zw2Fetch(
   return { ok: resp.ok, status: resp.status, data };
 }
 
+export async function zw2ForceReauth(): Promise<{ success: boolean; error?: string }> {
+  state.accessToken = null;
+  state.refreshToken = null;
+  try {
+    await zw2Login();
+    const check = await zw2Fetch("/api/v1/orders/?limit=1");
+    if (!check.ok) return { success: false, error: `Token test failed: HTTP ${check.status}` };
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: String(err) };
+  }
+}
+
 export function getZw2Base(): string {
   return ZW2_BASE;
 }

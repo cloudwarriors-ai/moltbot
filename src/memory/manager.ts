@@ -9,9 +9,11 @@ import type {
   MemoryProviderStatus,
   MemorySearchManager,
   MemorySearchResult,
+  MemorySearchScope,
   MemorySource,
   MemorySyncProgressUpdate,
 } from "./types.js";
+import { resolveSearchPathPrefix } from "./types.js";
 import { resolveAgentDir, resolveAgentWorkspaceDir } from "../agents/agent-scope.js";
 import { resolveMemorySearchConfig } from "../agents/memory-search.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
@@ -26,7 +28,7 @@ import {
 import { bm25RankToScore, buildFtsQuery, mergeHybridResults } from "./hybrid.js";
 import { isMemoryPath, normalizeExtraMemoryPaths } from "./internal.js";
 import { memoryManagerEmbeddingOps } from "./manager-embedding-ops.js";
-import { searchKeyword, searchVector } from "./manager-search.js";
+import { buildPathFilter, searchKeyword, searchVector, type PathFilter } from "./manager-search.js";
 import { memoryManagerSyncOps } from "./manager-sync-ops.js";
 const SNIPPET_MAX_CHARS = 700;
 const VECTOR_TABLE = "chunks_vec";
@@ -205,6 +207,9 @@ export class MemoryIndexManager implements MemorySearchManager {
       maxResults?: number;
       minScore?: number;
       sessionKey?: string;
+      scope?: MemorySearchScope;
+      channelSlug?: string;
+      excludeSlugs?: string[];
     },
   ): Promise<MemorySearchResult[]> {
     void this.warmSession(opts?.sessionKey);
@@ -217,6 +222,15 @@ export class MemoryIndexManager implements MemorySearchManager {
     if (!cleaned) {
       return [];
     }
+
+    // Resolve scope to a path prefix filter
+    const scopeRes = resolveSearchPathPrefix(opts?.scope, opts?.channelSlug, opts?.excludeSlugs);
+    if (scopeRes?.denied) {
+      return []; // fail-closed: channel scope without slug
+    }
+    const pathFilter = buildPathFilter(scopeRes?.prefix, "c", scopeRes?.excludePrefixes);
+    const pathFilterNoAlias = buildPathFilter(scopeRes?.prefix, undefined, scopeRes?.excludePrefixes);
+
     const minScore = opts?.minScore ?? this.settings.query.minScore;
     const maxResults = opts?.maxResults ?? this.settings.query.maxResults;
     const hybrid = this.settings.query.hybrid;
@@ -226,13 +240,13 @@ export class MemoryIndexManager implements MemorySearchManager {
     );
 
     const keywordResults = hybrid.enabled
-      ? await this.searchKeyword(cleaned, candidates).catch(() => [])
+      ? await this.searchKeyword(cleaned, candidates, pathFilterNoAlias).catch(() => [])
       : [];
 
     const queryVec = (await this.embedQueryWithTimeout(cleaned)) as number[];
     const hasVector = queryVec.some((v) => v !== 0);
     const vectorResults = hasVector
-      ? await this.searchVector(queryVec, candidates).catch(() => [])
+      ? await this.searchVector(queryVec, candidates, pathFilter).catch(() => [])
       : [];
 
     if (!hybrid.enabled) {
@@ -252,6 +266,7 @@ export class MemoryIndexManager implements MemorySearchManager {
   private async searchVector(
     queryVec: number[],
     limit: number,
+    pathFilter?: PathFilter,
   ): Promise<Array<MemorySearchResult & { id: string }>> {
     const results = await searchVector({
       db: this.db,
@@ -263,6 +278,7 @@ export class MemoryIndexManager implements MemorySearchManager {
       ensureVectorReady: async (dimensions) => await this.ensureVectorReady(dimensions),
       sourceFilterVec: this.buildSourceFilter("c"),
       sourceFilterChunks: this.buildSourceFilter(),
+      pathFilter,
     });
     return results.map((entry) => entry as MemorySearchResult & { id: string });
   }
@@ -274,6 +290,7 @@ export class MemoryIndexManager implements MemorySearchManager {
   private async searchKeyword(
     query: string,
     limit: number,
+    pathFilter?: PathFilter,
   ): Promise<Array<MemorySearchResult & { id: string; textScore: number }>> {
     if (!this.fts.enabled || !this.fts.available) {
       return [];
@@ -287,6 +304,7 @@ export class MemoryIndexManager implements MemorySearchManager {
       limit,
       snippetMaxChars: SNIPPET_MAX_CHARS,
       sourceFilter,
+      pathFilter,
       buildFtsQuery: (raw) => this.buildFtsQuery(raw),
       bm25RankToScore,
     });

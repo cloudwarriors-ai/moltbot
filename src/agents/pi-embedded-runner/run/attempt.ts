@@ -318,6 +318,11 @@ export async function runEmbeddedAttempt(
           requireExplicitMessageTarget:
             params.requireExplicitMessageTarget ?? isSubagentSessionKey(params.sessionKey),
           disableMessageTool: params.disableMessageTool,
+          channelSlug: params.channelSlug,
+          isSupport: params.isSupport,
+          defaultMemoryScope: params.defaultMemoryScope,
+          allowAllCustomersMemoryScope: params.allowAllCustomersMemoryScope,
+          excludeMemorySlugs: params.excludeMemorySlugs,
         });
     const tools = sanitizeToolsForGoogle({ tools: toolsRaw, provider: params.provider });
     logToolSchemasForGoogle({ tools, provider: params.provider });
