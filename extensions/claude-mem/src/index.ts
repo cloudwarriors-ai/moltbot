@@ -529,38 +529,6 @@ export default function claudeMemPlugin(api: OpenClawPluginApi): void {
   });
 
   // ------------------------------------------------------------------
-  // Delegated core tools: memory_search and memory_get
-  // These use the core scoped-retrieval engine over memory/customers/**
-  // and inherit scope policy from the plugin tool context.
-  // ------------------------------------------------------------------
-
-  api.registerTool((ctx) => {
-    const tools: AgentTool[] = [];
-    const createSearch = api.runtime?.tools?.createMemorySearchTool;
-    const createGet = api.runtime?.tools?.createMemoryGetTool;
-    if (createSearch) {
-      const searchTool = createSearch({
-        config: ctx.config as Record<string, unknown>,
-        agentSessionKey: ctx.sessionKey,
-        channelSlug: ctx.channelSlug,
-        isSupport: ctx.isSupport,
-        defaultScope: ctx.defaultMemoryScope,
-        allowAllCustomers: ctx.allowAllCustomersMemoryScope,
-        excludeSlugs: ctx.excludeMemorySlugs,
-      });
-      if (searchTool) tools.push(searchTool as unknown as AgentTool);
-    }
-    if (createGet) {
-      const getTool = createGet({
-        config: ctx.config as Record<string, unknown>,
-        agentSessionKey: ctx.sessionKey,
-      });
-      if (getTool) tools.push(getTool as unknown as AgentTool);
-    }
-    return tools.length > 0 ? tools : null;
-  }, { names: ["memory_search", "memory_get"] });
-
-  // ------------------------------------------------------------------
   // Debug/telemetry tools: obs_search, obs_save (observation layer)
   // ------------------------------------------------------------------
 

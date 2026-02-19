@@ -19,6 +19,7 @@ import { createSessionsSendTool } from "./tools/sessions-send-tool.js";
 import { createSessionsSpawnTool } from "./tools/sessions-spawn-tool.js";
 import { createSubagentsTool } from "./tools/subagents-tool.js";
 import { createTtsTool } from "./tools/tts-tool.js";
+import { createMemoryGetTool, createMemorySearchTool } from "./tools/memory-tool.js";
 import { createWebFetchTool, createWebSearchTool } from "./tools/web-tools.js";
 import { resolveWorkspaceRoot } from "./workspace-dir.js";
 
@@ -169,6 +170,23 @@ export function createOpenClawTools(options?: {
     ...(webFetchTool ? [webFetchTool] : []),
     ...(imageTool ? [imageTool] : []),
   ];
+
+  // Core memory tools — scoped retrieval over workspace files (memory/customers/**)
+  const memorySearchTool = createMemorySearchTool({
+    config: options?.config,
+    agentSessionKey: options?.agentSessionKey,
+    channelSlug: options?.channelSlug,
+    isSupport: options?.isSupport,
+    defaultScope: options?.defaultMemoryScope,
+    allowAllCustomers: options?.allowAllCustomersMemoryScope,
+    excludeSlugs: options?.excludeMemorySlugs,
+  });
+  if (memorySearchTool) tools.push(memorySearchTool);
+  const memoryGetTool = createMemoryGetTool({
+    config: options?.config,
+    agentSessionKey: options?.agentSessionKey,
+  });
+  if (memoryGetTool) tools.push(memoryGetTool);
 
   const pluginTools = resolvePluginTools({
     context: {

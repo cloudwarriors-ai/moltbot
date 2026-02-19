@@ -723,12 +723,15 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
           replyOptions,
         });
 
+        // Reply delivery is queued; wait until all payloads are delivered
+        // before reading collectedParts.
+        await dispatcher.waitForIdle();
         markDispatchIdle();
         clearSessionObserve(route.sessionKey);
 
-        const execResult = collectedParts.join("\n").trim();
+        const execResult = collectedParts.join("\n").replace(/\[NO_RESPONSE\]/gi, "").trim();
 
-        if (execResult && !execResult.includes("[NO_RESPONSE]")) {
+        if (execResult) {
           if (!blockedSet.silent) {
             const toolFirstName = blockedSet.senderName.split(/[@\s.]/)[0];
             const toolDisplayName = toolFirstName.charAt(0).toUpperCase() + toolFirstName.slice(1).toLowerCase();
@@ -910,11 +913,14 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
           replyOptions,
         });
 
+        // Reply delivery is queued; wait until all payloads are delivered
+        // before reading collectedParts.
+        await dispatcher.waitForIdle();
         markDispatchIdle();
 
-        const execResult = collectedParts.join("\n").trim();
+        const execResult = collectedParts.join("\n").replace(/\[NO_RESPONSE\]/gi, "").trim();
 
-        if (execResult && !execResult.includes("[NO_RESPONSE]")) {
+        if (execResult) {
           // Post the execution result to the original channel (skip in silent mode)
           if (!pending.silent) {
             const actionFirstName = pending.originalSenderName.split(/[@\s.]/)[0];
@@ -1428,6 +1434,9 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
         replyOptions,
       });
 
+      // Reply delivery is queued; wait until all payloads are delivered
+      // before reading collectedParts.
+      await dispatcher.waitForIdle();
       markDispatchIdle();
 
       const newAnswer = collectedParts.join("\n").trim();
@@ -1681,6 +1690,9 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
         replyOptions,
       });
 
+      // Reply delivery is queued; wait until all payloads are delivered
+      // before reading collectedParts.
+      await dispatcher.waitForIdle();
       markDispatchIdle();
 
       // Check if any write tools were blocked during this dispatch
@@ -1726,11 +1738,16 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
         return;
       }
 
-      const fullReply = collectedParts.join("\n").trim();
+      // Combine all delivered text, then strip [NO_RESPONSE] tags the agent may have
+      // emitted before calling tools.  Only treat as no-response if nothing meaningful
+      // remains after stripping.
+      const rawReply = collectedParts.join("\n").trim();
+      const fullReply = rawReply.replace(/\[NO_RESPONSE\]/gi, "").trim();
+      log.info("observe mode: collectedParts", { count: collectedParts.length, rawLen: rawReply.length, cleanLen: fullReply.length, snippet: fullReply.slice(0, 120) });
 
-      // If no reply or agent signals not a question, send to review channel for visibility
+      // If no reply or only [NO_RESPONSE] tags remain, send to review channel for visibility
       // skipFilter=true means a reviewer already allowed this message — post it directly
-      if (!skipFilter && (!fullReply || fullReply.includes("[NO_RESPONSE]"))) {
+      if (!skipFilter && !fullReply) {
         log.debug("observe mode: not a question, routing to review channel", { channelJid });
         const refId = storePrefilterBlock({
           conversationId, senderId, senderName, text,
@@ -1795,9 +1812,8 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
         return;
       }
 
-      // Strip any stale tags the agent might emit
+      // Strip any stale tags the agent might emit (NO_RESPONSE already removed above)
       let cleanReply = fullReply
-        .replace(/\[NO_RESPONSE\]/gi, "")
         .replace(/\[TOOLS_USED\]\s*.*/i, "")
         .replace(/\[PROPOSED_ACTION\][\s\S]*/i, "")
         .trim();
@@ -1984,6 +2000,8 @@ export async function routeMessageToAgent(params: {
       replyOptions,
     });
 
+    // Ensure queued deliveries are flushed before marking idle/logging counts.
+    await dispatcher.waitForIdle();
     markDispatchIdle();
 
     if (queuedFinal) {
