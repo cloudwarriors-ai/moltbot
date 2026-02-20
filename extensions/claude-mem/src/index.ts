@@ -420,7 +420,8 @@ export default function claudeMemPlugin(api: OpenClawPluginApi): void {
       project: getProjectName(ctx),
       prompt: event.prompt || "agent run",
     }, api.logger);
-    if (syncMemoryFile && ctx.workspaceDir) {
+    const isPulsebot = ctx.agentId === "pulsebot" || (ctx.sessionKey || "").includes("pulsebot") || (ctx.workspaceDir || "").includes("pulsebot");
+    if (syncMemoryFile && ctx.workspaceDir && !isPulsebot) {
       await syncMemoryToWorkspace(ctx.workspaceDir, ctx);
     }
   });
@@ -448,7 +449,8 @@ export default function claudeMemPlugin(api: OpenClawPluginApi): void {
       cwd: "",
     }, api.logger);
     const workspaceDir = ctx.workspaceDir || workspaceDirsBySessionKey.get(ctx.sessionKey || "default");
-    if (syncMemoryFile && workspaceDir) {
+    const isPulsebotTrp = ctx.agentId === "pulsebot" || (ctx.sessionKey || "").includes("pulsebot") || (workspaceDir || "").includes("pulsebot");
+    if (syncMemoryFile && workspaceDir && !isPulsebotTrp) {
       syncMemoryToWorkspace(workspaceDir, ctx);
     }
   });

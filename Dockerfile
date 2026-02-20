@@ -4,6 +4,14 @@ FROM node:22-bookworm
 RUN curl -fsSL https://bun.sh/install | bash
 ENV PATH="/root/.bun/bin:${PATH}"
 
+# Install GitHub CLI (used by agents for issue management)
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+      -o /usr/share/keyrings/githubcli-archive-keyring.gpg && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+      > /etc/apt/sources.list.d/github-cli.list && \
+    apt-get update -qq && apt-get install -y -qq gh && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
 # Install ngrok (used by 2fa-github extension for OAuth callback)
 RUN curl -fsSL https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-$(dpkg --print-architecture).tgz \
     | tar xz -C /usr/local/bin

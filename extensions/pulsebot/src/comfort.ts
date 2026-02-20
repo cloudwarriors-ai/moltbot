@@ -1,0 +1,60 @@
+const PULSEBOT_CHANNEL = "b6a0428ca4364fd9873fe6a2ea1376fd@conference.xmpp.zoom.us";
+
+let cachedToken: { token: string; expiresAt: number } | null = null;
+
+async function getToken(): Promise<string> {
+  if (cachedToken && Date.now() < cachedToken.expiresAt - 60_000) {
+    return cachedToken.token;
+  }
+  const clientId = process.env.ZOOM_CLIENT_ID ?? "";
+  const clientSecret = process.env.ZOOM_CLIENT_SECRET ?? "";
+  const auth = Buffer.from(`${clientId}:${clientSecret}`).toString("base64");
+  const resp = await fetch("https://zoom.us/oauth/token?grant_type=client_credentials", {
+    method: "POST",
+    headers: { Authorization: `Basic ${auth}` },
+  });
+  if (!resp.ok) throw new Error(`Zoom token failed: ${resp.status}`);
+  const data = (await resp.json()) as { access_token: string; expires_in: number };
+  cachedToken = { token: data.access_token, expiresAt: Date.now() + data.expires_in * 1000 };
+  return cachedToken.token;
+}
+
+const COMFORT_MESSAGES = [
+  "On it — pulling up the details now...",
+  "Looking into that, one moment...",
+  "Checking Project Pulse, hang tight...",
+  "Gathering the info now...",
+  "Let me dig into that...",
+];
+
+export async function sendComfortMessage(channelJid: string): Promise<void> {
+  if (channelJid !== PULSEBOT_CHANNEL) return;
+
+  const botJid = process.env.ZOOM_BOT_JID ?? "";
+  const accountId = process.env.ZOOM_ACCOUNT_ID ?? "";
+  if (!botJid || !accountId) return;
+
+  const text = COMFORT_MESSAGES[Math.floor(Math.random() * COMFORT_MESSAGES.length)];
+
+  try {
+    const token = await getToken();
+    await fetch("https://api.zoom.us/v2/im/chat/messages", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        robot_jid: botJid,
+        to_jid: channelJid,
+        account_id: accountId,
+        content: {
+          head: { text: "PulseBot" },
+          body: [{ type: "message", text }],
+        },
+      }),
+    });
+  } catch (err) {
+    console.error("[pulsebot] comfort message failed:", err);
+  }
+}

@@ -302,7 +302,7 @@ export function registerZoomTools(api: OpenClawPluginApi) {
           content: [
             {
               type: "text" as const,
-              text: JSON.stringify({ ok: true, uploadUrl, token }),
+              text: JSON.stringify({ ok: true, uploadUrl, token, hint: "Send the link as plain text or [Upload File](url) — do NOT wrap in bold **. Zoom breaks URLs inside **bold**." }),
             },
           ],
         };

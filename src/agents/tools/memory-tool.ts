@@ -44,8 +44,12 @@ function resolveEffectiveScope(params: {
 }): { effectiveScope: MemorySearchScope; scopeDenied: boolean } {
   const raw = params.requested ?? params.defaultScope ?? "global";
 
-  // Non-support sessions cannot use channel/all-customers scopes
-  if (!params.isSupport && (raw === "channel" || raw === "all-customers")) {
+  // Non-support sessions cannot use all-customers scope;
+  // channel scope is allowed for ANY session that has a valid channelSlug
+  if (!params.isSupport && raw === "all-customers") {
+    return { effectiveScope: "global", scopeDenied: false };
+  }
+  if (!params.isSupport && raw === "channel" && !params.channelSlug) {
     return { effectiveScope: "global", scopeDenied: false };
   }
 
@@ -87,7 +91,8 @@ export function createMemorySearchTool(options: {
     name: "memory_search",
     description:
       "Mandatory recall step: semantically search MEMORY.md + memory/*.md (and optional session transcripts) before answering questions about prior work, decisions, dates, people, preferences, or todos; returns top snippets with path + lines." +
-      (options.isSupport ? " Supports scope parameter: 'channel' (current customer), 'all-customers', or 'global'." : ""),
+      (options.channelSlug ? " Supports scope parameter: 'channel' (current customer — USE THIS for trained Q&A recall), 'global'." : "") +
+      (options.isSupport ? " Also supports 'all-customers' scope for cross-customer search." : ""),
     parameters: MemorySearchSchema,
     execute: async (_toolCallId, params) => {
       const query = readStringParam(params, "query", { required: true });

@@ -1,0 +1,196 @@
+import { Type } from "@sinclair/typebox";
+import { execSync } from "child_process";
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import { jsonResult, errorResult } from "./pp-api.js";
+import type { AuditLogger } from "./audit.js";
+import { wrapToolWithAudit } from "./audit.js";
+
+type PluginConfig = { ppRepos?: string[] };
+
+function getAllowedRepos(config: PluginConfig): string[] {
+  return config.ppRepos ?? ["cloudwarriors-ai/project-pulse"];
+}
+
+function assertAllowedRepo(repo: string, config: PluginConfig) {
+  const allowed = getAllowedRepos(config);
+  if (!allowed.includes(repo)) {
+    throw new Error(`Repo "${repo}" not in allowed list: ${allowed.join(", ")}`);
+  }
+}
+
+function gh(args: string): unknown {
+  const result = execSync(`gh ${args}`, {
+    encoding: "utf-8",
+    timeout: 30000,
+    env: { ...process.env, GH_NO_UPDATE_NOTIFIER: "1" },
+  });
+  try {
+    return JSON.parse(result);
+  } catch {
+    return result.trim();
+  }
+}
+
+export function registerGhTools(api: OpenClawPluginApi, logger: AuditLogger, config: PluginConfig) {
+  // gh_list_issues
+  api.registerTool(() =>
+    wrapToolWithAudit(
+      {
+        name: "gh_list_issues",
+        description: "List GitHub issues from a Project Pulse repo. Returns title, number, state, labels, assignees.",
+        parameters: Type.Object({
+          repo: Type.Optional(Type.String({ description: "Repo (owner/name). Defaults to primary PP repo." })),
+          state: Type.Optional(Type.String({ description: "Filter: open, closed, all (default: open)" })),
+          label: Type.Optional(Type.String({ description: "Filter by label" })),
+          limit: Type.Optional(Type.Number({ description: "Max results (default 30)" })),
+        }),
+        async execute(_id: string, params: Record<string, unknown>) {
+          try {
+            const repo = (params.repo as string) || getAllowedRepos(config)[0];
+            assertAllowedRepo(repo, config);
+            const state = (params.state as string) || "open";
+            const limit = (params.limit as number) || 30;
+            const labelFlag = params.label ? ` --label "${params.label}"` : "";
+            const data = gh(
+              `issue list --repo ${repo} --state ${state} --limit ${limit}${labelFlag} --json number,title,state,labels,assignees,createdAt,updatedAt`,
+            );
+            return jsonResult({ ok: true, data });
+          } catch (err) {
+            return errorResult(err);
+          }
+        },
+      },
+      logger,
+    ),
+  );
+
+  // gh_get_issue
+  api.registerTool(() =>
+    wrapToolWithAudit(
+      {
+        name: "gh_get_issue",
+        description: "Get details of a specific GitHub issue including comments.",
+        parameters: Type.Object({
+          repo: Type.Optional(Type.String({ description: "Repo (owner/name). Defaults to primary PP repo." })),
+          number: Type.Number({ description: "Issue number" }),
+        }),
+        async execute(_id: string, params: Record<string, unknown>) {
+          try {
+            const repo = (params.repo as string) || getAllowedRepos(config)[0];
+            assertAllowedRepo(repo, config);
+            const data = gh(
+              `issue view ${params.number} --repo ${repo} --json number,title,body,state,labels,assignees,comments,createdAt,updatedAt,closedAt`,
+            );
+            return jsonResult({ ok: true, data });
+          } catch (err) {
+            return errorResult(err);
+          }
+        },
+      },
+      logger,
+    ),
+  );
+
+  // gh_create_issue
+  api.registerTool(() =>
+    wrapToolWithAudit(
+      {
+        name: "gh_create_issue",
+        description: "Create a new GitHub issue in a Project Pulse repo.",
+        parameters: Type.Object({
+          repo: Type.Optional(Type.String({ description: "Repo (owner/name). Defaults to primary PP repo." })),
+          title: Type.String({ description: "Issue title" }),
+          body: Type.String({ description: "Issue body (markdown)" }),
+          labels: Type.Optional(Type.Array(Type.String(), { description: "Labels to apply" })),
+        }),
+        async execute(_id: string, params: Record<string, unknown>) {
+          try {
+            const repo = (params.repo as string) || getAllowedRepos(config)[0];
+            assertAllowedRepo(repo, config);
+            const labels = params.labels as string[] | undefined;
+            const labelFlag = labels?.length ? ` --label "${labels.join(",")}"` : "";
+            // Use stdin for body to avoid shell escaping issues
+            const bodyStr = params.body as string;
+            const result = execSync(
+              `gh issue create --repo ${repo} --title "${(params.title as string).replace(/"/g, '\\"')}"${labelFlag} --body-file -`,
+              {
+                encoding: "utf-8",
+                input: bodyStr,
+                timeout: 30000,
+                env: { ...process.env, GH_NO_UPDATE_NOTIFIER: "1" },
+              },
+            );
+            return jsonResult({ ok: true, url: result.trim() });
+          } catch (err) {
+            return errorResult(err);
+          }
+        },
+      },
+      logger,
+    ),
+  );
+
+  // gh_add_comment
+  api.registerTool(() =>
+    wrapToolWithAudit(
+      {
+        name: "gh_add_comment",
+        description: "Add a comment to an existing GitHub issue.",
+        parameters: Type.Object({
+          repo: Type.Optional(Type.String({ description: "Repo (owner/name). Defaults to primary PP repo." })),
+          number: Type.Number({ description: "Issue number" }),
+          body: Type.String({ description: "Comment body (markdown)" }),
+        }),
+        async execute(_id: string, params: Record<string, unknown>) {
+          try {
+            const repo = (params.repo as string) || getAllowedRepos(config)[0];
+            assertAllowedRepo(repo, config);
+            const result = execSync(
+              `gh issue comment ${params.number} --repo ${repo} --body-file -`,
+              {
+                encoding: "utf-8",
+                input: params.body as string,
+                timeout: 30000,
+                env: { ...process.env, GH_NO_UPDATE_NOTIFIER: "1" },
+              },
+            );
+            return jsonResult({ ok: true, url: result.trim() });
+          } catch (err) {
+            return errorResult(err);
+          }
+        },
+      },
+      logger,
+    ),
+  );
+
+  // gh_search_issues
+  api.registerTool(() =>
+    wrapToolWithAudit(
+      {
+        name: "gh_search_issues",
+        description: "Search GitHub issues by keyword in Project Pulse repos.",
+        parameters: Type.Object({
+          query: Type.String({ description: "Search query" }),
+          repo: Type.Optional(Type.String({ description: "Repo (owner/name). Defaults to primary PP repo." })),
+          limit: Type.Optional(Type.Number({ description: "Max results (default 20)" })),
+        }),
+        async execute(_id: string, params: Record<string, unknown>) {
+          try {
+            const repo = (params.repo as string) || getAllowedRepos(config)[0];
+            assertAllowedRepo(repo, config);
+            const limit = (params.limit as number) || 20;
+            const query = (params.query as string).replace(/"/g, '\\"');
+            const data = gh(
+              `search issues "${query}" --repo ${repo} --limit ${limit} --json number,title,state,labels,repository,createdAt,updatedAt`,
+            );
+            return jsonResult({ ok: true, data });
+          } catch (err) {
+            return errorResult(err);
+          }
+        },
+      },
+      logger,
+    ),
+  );
+}

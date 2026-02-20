@@ -44,6 +44,7 @@ services:
       - ZOOM_REPORT_CLIENT_SECRET=${ZOOM_REPORT_CLIENT_SECRET}
       - ZOOM_REPORT_USER=${ZOOM_REPORT_USER}
       - ADMIN_DOMAIN=${ADMIN_DOMAIN:-cloudwarriors.ai}
+      - GH_TOKEN=${GITHUB_READ_ACCESS}
       - NODE_OPTIONS=--max-old-space-size=3072
       - OPENCLAW_NO_RESPAWN=1
     volumes:

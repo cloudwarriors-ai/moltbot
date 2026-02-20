@@ -1,0 +1,17 @@
+{
+  "id": "pulsebot",
+  "name": "PulseBot",
+  "description": "Project Pulse break/fix research agent tools",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "ppRepos": {
+        "type": "array",
+        "items": { "type": "string" },
+        "default": ["cloudwarriors-ai/project-pulse"],
+        "description": "GitHub repos scoped for PP issue management"
+      }
+    }
+  }
+}
