@@ -22,6 +22,8 @@ export type SendZoomMessageParams = {
   isChannel?: boolean;
   /** Optional: reply to a specific message */
   replyToMessageId?: string;
+  /** Optional speaker label used in card heading (e.g., "PulseBot says:"). */
+  speakerName?: string;
 };
 
 export type SendZoomMessageResult = {
@@ -31,6 +33,17 @@ export type SendZoomMessageResult = {
 
 /** Zoom Team Chat message limit */
 const ZOOM_TEXT_CHUNK_LIMIT = 4000;
+
+function normalizeSpeakerName(name?: string): string | undefined {
+  const normalized = name?.trim();
+  return normalized || undefined;
+}
+
+export function formatZoomSpeakerHeading(speakerName?: string): string {
+  const normalized = normalizeSpeakerName(speakerName);
+  if (!normalized) return "cwbot says:";
+  return `${normalized} says:`;
+}
 
 /** Strip markdown bold markers (**) that wrap or adjoin URLs */
 function cleanMarkdownUrls(text: string): string {
@@ -92,7 +105,7 @@ function parseMentions(text: string): { cleanText: string; atItems: ZoomAtItem[]
 export async function sendZoomTextMessage(
   params: SendZoomMessageParams,
 ): Promise<SendZoomMessageResult> {
-  const { cfg, to, isChannel, replyToMessageId } = params;
+  const { cfg, to, isChannel, replyToMessageId, speakerName } = params;
   const text = cleanMarkdownUrls(params.text);
   const zoomCfg = cfg.channels?.zoom as ZoomConfig | undefined;
   const creds = resolveZoomCredentials(zoomCfg);
@@ -109,11 +122,9 @@ export async function sendZoomTextMessage(
   const storedRef = await conversationStore.get(to);
   const accountId = storedRef?.accountId ?? creds.accountId;
 
-  log.debug("sending message", {
-    to,
-    isChannel,
-    textLength: text.length,
-  });
+  log.debug(
+    `sending message to=${to} channel=${Boolean(isChannel)} textLength=${text.length} replyToMessageId=${replyToMessageId ?? "none"}`,
+  );
 
   const { cleanText, atItems } = parseMentions(text);
 
@@ -121,7 +132,7 @@ export async function sendZoomTextMessage(
   // Zoom requires both head (title) and body (message content)
   const content = {
     head: {
-      text: "cwbot says:",
+      text: formatZoomSpeakerHeading(speakerName),
     },
     body: [
       {

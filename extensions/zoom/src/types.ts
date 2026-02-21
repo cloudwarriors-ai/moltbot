@@ -17,6 +17,17 @@ export type ZoomChannelConfig = {
   >;
 };
 
+export type ZoomThreadReplyMode = "off" | "incoming" | "all";
+
+export type ZoomThreadSessionScope = "parent" | "thread";
+
+export type ZoomThreadingConfig = {
+  enabled?: boolean;
+  replyToMode?: ZoomThreadReplyMode;
+  sessionScope?: ZoomThreadSessionScope;
+  inheritParent?: boolean;
+};
+
 export type ZoomConfig = {
   enabled?: boolean;
   clientId?: string;
@@ -38,6 +49,7 @@ export type ZoomConfig = {
   mediaMaxMb?: number;
   historyLimit?: number;
   dmHistoryLimit?: number;
+  threading?: ZoomThreadingConfig;
   channels?: Record<string, ZoomChannelConfig | undefined>;
   dms?: Record<string, unknown>;
   /** Public base URL for upload links, e.g. "https://molty-dev.cloudwarriors.ai" */
@@ -54,6 +66,7 @@ export type ZoomCredentials = {
 
 export type ZoomChatMessage = {
   id?: string;
+  reply_main_message_id?: string;
   message?: string;
   timestamp?: number;
   sender?: string;

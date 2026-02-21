@@ -4,6 +4,9 @@
  * Follows the same pattern as pending-shares.ts.
  */
 
+import type { ZoomInboundThreadContext } from "./threading.js";
+import type { ZoomThreadSessionScope } from "./types.js";
+
 const APPROVAL_TTL_MS = 2 * 60 * 60 * 1000; // 2 hours
 
 type PendingApproval = {
@@ -11,8 +14,12 @@ type PendingApproval = {
   originalChannelName: string;
   originalSenderName: string;
   originalSenderJid?: string;
+  agentId?: string;
   originalQuestion: string;
   proposedAnswer: string;
+  threadContext?: ZoomInboundThreadContext;
+  replyMainMessageId?: string;
+  sessionScopeAtCapture?: ZoomThreadSessionScope;
   silent?: boolean;
   expiresAt: number;
 };
@@ -40,8 +47,12 @@ type PendingApprovalData = {
   originalChannelName: string;
   originalSenderName: string;
   originalSenderJid?: string;
+  agentId?: string;
   originalQuestion: string;
   proposedAnswer: string;
+  threadContext?: ZoomInboundThreadContext;
+  replyMainMessageId?: string;
+  sessionScopeAtCapture?: ZoomThreadSessionScope;
   silent?: boolean;
 };
 

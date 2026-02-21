@@ -27,7 +27,10 @@ const COMFORT_MESSAGES = [
   "Let me dig into that...",
 ];
 
-export async function sendComfortMessage(channelJid: string): Promise<void> {
+export async function sendComfortMessage(
+  channelJid: string,
+  replyToMessageId?: string,
+): Promise<void> {
   if (channelJid !== PULSEBOT_CHANNEL) return;
 
   const botJid = process.env.ZOOM_BOT_JID ?? "";
@@ -35,24 +38,34 @@ export async function sendComfortMessage(channelJid: string): Promise<void> {
   if (!botJid || !accountId) return;
 
   const text = COMFORT_MESSAGES[Math.floor(Math.random() * COMFORT_MESSAGES.length)];
+  const normalizedReplyTo =
+    typeof replyToMessageId === "string" && replyToMessageId.trim().length > 0
+      ? replyToMessageId.trim()
+      : undefined;
 
   try {
     const token = await getToken();
+    const body: Record<string, unknown> = {
+      robot_jid: botJid,
+      to_jid: channelJid,
+      account_id: accountId,
+      content: {
+        head: { text: "PulseBot" },
+        body: [{ type: "message", text }],
+      },
+    };
+    if (normalizedReplyTo) {
+      // Keep both keys for compatibility across Zoom chat payload variants.
+      body.reply_to = normalizedReplyTo;
+      body.reply_main_message_id = normalizedReplyTo;
+    }
     await fetch("https://api.zoom.us/v2/im/chat/messages", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${token}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({
-        robot_jid: botJid,
-        to_jid: channelJid,
-        account_id: accountId,
-        content: {
-          head: { text: "PulseBot" },
-          body: [{ type: "message", text }],
-        },
-      }),
+      body: JSON.stringify(body),
     });
   } catch (err) {
     console.error("[pulsebot] comfort message failed:", err);

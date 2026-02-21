@@ -4,6 +4,9 @@
  * intercept their next DM as feedback for regenerating the answer.
  */
 
+import type { ZoomInboundThreadContext } from "./threading.js";
+import type { ZoomThreadSessionScope } from "./types.js";
+
 const TRAINING_TTL_MS = 30 * 60 * 1000; // 30 minutes
 
 export type TrainingSession = {
@@ -13,6 +16,10 @@ export type TrainingSession = {
   originalSenderName: string;
   originalQuestion: string;
   previousAnswer: string;
+  agentId?: string;
+  threadContext?: ZoomInboundThreadContext;
+  replyMainMessageId?: string;
+  sessionScopeAtCapture?: ZoomThreadSessionScope;
   reviewChannelJid: string;
   expiresAt: number;
 };

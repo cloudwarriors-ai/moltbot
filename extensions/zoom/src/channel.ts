@@ -6,6 +6,7 @@ import { zoomOutbound } from "./outbound.js";
 import { probeZoom } from "./probe.js";
 import { resolveZoomGroupToolPolicy } from "./policy.js";
 import { sendZoomTextMessage } from "./send.js";
+import { resolveZoomThreadingConfig } from "./threading.js";
 import { resolveZoomCredentials } from "./token.js";
 import type { ZoomConfig } from "./types.js";
 
@@ -45,8 +46,17 @@ export const zoomPlugin: ChannelPlugin<ResolvedZoomAccount> = {
   },
   capabilities: {
     chatTypes: ["direct", "channel"],
-    threads: false,
+    threads: true,
     media: false,
+  },
+  threading: {
+    resolveReplyToMode: ({ cfg }) => {
+      const zoomCfg = cfg.channels?.zoom as ZoomConfig | undefined;
+      const threading = resolveZoomThreadingConfig(zoomCfg);
+      if (!threading.enabled || threading.replyToMode === "off") return "off";
+      if (threading.replyToMode === "all") return "all";
+      return "first";
+    },
   },
   groups: {
     resolveToolPolicy: resolveZoomGroupToolPolicy,

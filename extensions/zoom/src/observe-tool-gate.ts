@@ -15,6 +15,9 @@
  * 7. After dispatch completes → clearSessionObserve() cleans up
  */
 
+import type { ZoomInboundThreadContext } from "./threading.js";
+import type { ZoomThreadSessionScope } from "./types.js";
+
 /** Tools that require approval in observe mode */
 const WRITE_TOOLS = new Set([
   "zw2_submit_zp_license",
@@ -33,7 +36,11 @@ type ObserveSession = {
   reviewChannelJid: string;
   senderName: string;
   senderJid?: string;
+  agentId?: string;
   question: string;
+  threadContext?: ZoomInboundThreadContext;
+  replyMainMessageId?: string;
+  sessionScopeAtCapture?: ZoomThreadSessionScope;
   silent?: boolean;
 };
 
@@ -56,7 +63,11 @@ type StoredBlockedCallSet = {
   reviewChannelJid: string;
   senderName: string;
   senderJid?: string;
+  agentId?: string;
   question: string;
+  threadContext?: ZoomInboundThreadContext;
+  replyMainMessageId?: string;
+  sessionScopeAtCapture?: ZoomThreadSessionScope;
   silent?: boolean;
   expiresAt: number;
 };
@@ -110,7 +121,12 @@ export function getSessionBlockedTools(sessionKey: string): { refId: string; too
     channelName: session.channelName,
     reviewChannelJid: session.reviewChannelJid,
     senderName: session.senderName,
+    senderJid: session.senderJid,
+    agentId: session.agentId,
     question: session.question,
+    threadContext: session.threadContext,
+    replyMainMessageId: session.replyMainMessageId,
+    sessionScopeAtCapture: session.sessionScopeAtCapture,
     silent: session.silent,
     expiresAt: Date.now() + APPROVAL_TTL_MS,
   });

@@ -126,6 +126,9 @@ export async function sendZoomMessage(
   }
 
   if (params.replyMainMessageId) {
+    // Zoom chatbot endpoint accepts `reply_to` for threaded replies.
+    // Keep `reply_main_message_id` for compatibility with older payloads.
+    body.reply_to = params.replyMainMessageId;
     body.reply_main_message_id = params.replyMainMessageId;
   }
 

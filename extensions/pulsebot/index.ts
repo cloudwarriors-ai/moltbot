@@ -34,9 +34,11 @@ const plugin = {
     registerCorrelationTools(api, logger, pluginConfig);
 
     // Send comfort message when a message arrives in the pulsebot channel
-    api.on("message_received", async (_event, ctx) => {
+    api.on("message_received", async (event, ctx) => {
       if (ctx.channelId === "zoom" && ctx.conversationId) {
-        void sendComfortMessage(ctx.conversationId);
+        const messageId =
+          typeof event.metadata?.messageId === "string" ? event.metadata.messageId : undefined;
+        void sendComfortMessage(ctx.conversationId, messageId);
       }
     });
 
