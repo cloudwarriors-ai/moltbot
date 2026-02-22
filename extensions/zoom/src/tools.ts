@@ -7,6 +7,23 @@ import { storePendingShare } from "./pending-shares.js";
 import { PREFILTER_CONFIG_PATH, DEFAULT_SYSTEM_PROMPT, DEFAULT_MODEL, readPrefilterConfig } from "./prefilter.js";
 import type { ZoomBodyItem, ZoomConfig } from "./types.js";
 import { createUploadToken } from "./upload-tokens.js";
+import { resolveZoomUploadDir } from "./upload-path.js";
+import { getRememberedZoomSessionReplyRoot } from "./thread-state.js";
+
+function resolveUploadReplyMainMessageId(sessionKey?: string): string | undefined {
+  const rememberedReplyRoot = getRememberedZoomSessionReplyRoot(sessionKey);
+  if (rememberedReplyRoot) return rememberedReplyRoot;
+
+  const normalized = sessionKey?.trim();
+  if (!normalized) return undefined;
+  const match = normalized.match(/^agent:[^:]+:zoom:channel:(.+)$/);
+  const peerId = match?.[1]?.trim();
+  if (!peerId) return undefined;
+  // Channel-scope sessions look like "<channel>@conference.xmpp.zoom.us".
+  // Thread-scope sessions use the parent message id we can reply under.
+  if (peerId.includes("@conference.")) return undefined;
+  return peerId;
+}
 
 export function registerZoomTools(api: OpenClawPluginApi) {
   // zoom_send_action_card - send interactive message with buttons
@@ -291,6 +308,10 @@ export function registerZoomTools(api: OpenClawPluginApi) {
           userJid,
           isDirect,
           channelJid,
+          sessionKey: ctx.sessionKey,
+          agentId: ctx.agentId,
+          accountId: ctx.agentAccountId,
+          replyMainMessageId: resolveUploadReplyMainMessageId(ctx.sessionKey),
           label,
         });
 
@@ -449,7 +470,7 @@ export function registerZoomTools(api: OpenClawPluginApi) {
       }),
       async execute(_id: string, params: Record<string, unknown>) {
         const filePath = params.file_path as string;
-        const uploadDir = path.resolve(".data/zoom-uploads");
+        const uploadDir = resolveZoomUploadDir();
         if (!filePath.startsWith(uploadDir) || !fs.existsSync(filePath)) {
           return {
             content: [{ type: "text" as const, text: JSON.stringify({ ok: false, error: "File not found or outside uploads directory" }) }],

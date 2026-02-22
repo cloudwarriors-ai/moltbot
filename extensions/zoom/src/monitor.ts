@@ -7,6 +7,7 @@ import { formatUnknownError } from "./errors.js";
 import { createZoomMessageHandler } from "./monitor-handler.js";
 import type { ZoomMonitorLogger } from "./monitor-types.js";
 import { createUploadRoutes } from "./upload-handler.js";
+import { resolveZoomUploadDir } from "./upload-path.js";
 import { resolveZoomCredentials } from "./token.js";
 import type { ZoomConfig, ZoomCredentials } from "./types.js";
 import { handleZoomChallenge, verifyZoomWebhook } from "./webhook.js";
@@ -97,8 +98,7 @@ export async function monitorZoomProvider(
   expressApp.post("/zoom/file", express.json({ limit: "15mb" }), uploadRoutes.handlePost);
 
   // Serve uploaded files
-  const path = await import("node:path");
-  const uploadDir = path.resolve(".data/zoom-uploads");
+  const uploadDir = resolveZoomUploadDir();
   expressApp.use("/zoom/uploads", express.static(uploadDir));
 
   // Webhook endpoint

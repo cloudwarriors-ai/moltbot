@@ -38,6 +38,13 @@ export interface PrefilterConfig {
   model?: string;
 }
 
+/** Feature flag: disable prefilter classifier entirely when set false-ish. */
+export function isPrefilterEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const raw = env.ZOOM_PREFILTER_ENABLED?.trim().toLowerCase();
+  if (!raw) return true;
+  return !["0", "false", "off", "no", "disabled"].includes(raw);
+}
+
 export type PrefilterExample = {
   text: string;
   label: "RESPOND" | "SKIP";

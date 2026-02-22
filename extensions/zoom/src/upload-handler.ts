@@ -6,9 +6,10 @@ import type { ZoomMessageHandlerDeps } from "./monitor-handler.js";
 import { routeMessageToAgent } from "./monitor-handler.js";
 import { copyDocToCustomer, ensureCustomerDir } from "./channel-memory.js";
 import { getUploadErrorHtml, getUploadPageHtml } from "./upload-page.js";
+import { resolveZoomUploadDir } from "./upload-path.js";
 import { consumeUploadToken, peekUploadToken } from "./upload-tokens.js";
 
-const UPLOAD_DIR = path.resolve(".data/zoom-uploads");
+const UPLOAD_DIR = resolveZoomUploadDir();
 
 function ensureDir(dir: string): void {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -119,6 +120,10 @@ export function createUploadRoutes(deps: ZoomMessageHandlerDeps) {
         isDirect: ctx.isDirect,
         channelJid: ctx.channelJid,
         channelName: ctx.channelName,
+        sessionKeyOverride: ctx.sessionKey,
+        agentIdOverride: ctx.agentId,
+        accountIdOverride: ctx.accountId,
+        replyToMessageId: ctx.replyMainMessageId,
       });
 
       res.json({ ok: true });

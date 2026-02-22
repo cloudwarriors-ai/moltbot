@@ -162,7 +162,7 @@ export function resolveZoomOutboundReplyMessageId(params: {
   }
 
   if (params.payloadReplyToCurrent === true) {
-    return context?.incomingMessageId;
+    return context?.incomingMessageId ?? normalizedResolved;
   }
 
   return normalizedResolved;

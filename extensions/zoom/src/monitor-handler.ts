@@ -14,7 +14,7 @@ import { getPendingShare } from "./pending-shares.js";
 import { consumeTrainingSession, storeTrainingSession } from "./pending-training.js";
 import { createUploadToken } from "./upload-tokens.js";
 import { isZoomGroupAllowed, resolveZoomAllowlistMatch, resolveZoomObservePolicy, resolveZoomReplyPolicy, resolveZoomRouteConfig } from "./policy.js";
-import { shouldRespond, savePrefilterExample } from "./prefilter.js";
+import { shouldRespond, savePrefilterExample, isPrefilterEnabled } from "./prefilter.js";
 import type { ZoomConfig, ZoomCredentials, ZoomWebhookEvent } from "./types.js";
 import {
   parseZoomInboundThreadContext,
@@ -23,6 +23,7 @@ import {
   resolveZoomThreadingConfig,
 } from "./threading.js";
 import type { ZoomInboundThreadContext } from "./threading.js";
+import { rememberZoomSessionReplyRoot } from "./thread-state.js";
 import { getZoomRuntime } from "./runtime.js";
 
 /** In-memory roleplay personas for observe mode testing. Key: `${channelJid}::${userJid}` */
@@ -1587,6 +1588,7 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
       roleplay,
       skipFilter,
     } = params;
+    const prefilterEnabled = isPrefilterEnabled();
 
     try {
       log.debug("routing to agent with observe mode", {
@@ -1595,6 +1597,7 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
         isThreadReply,
         mode,
         roleplay,
+        prefilterEnabled,
         threadId: threadContext?.threadId,
       });
       const threading = resolveZoomThreadingConfig(zoomCfg, log);
@@ -1606,7 +1609,7 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
 
       // Pre-filter: classify message before sending ack.
       // Thread replies, silent/training modes, roleplay, and reviewer-allowed messages bypass the filter.
-      if (!isThreadReply && mode === "active" && !roleplay && !skipFilter) {
+      if (prefilterEnabled && !isThreadReply && mode === "active" && !roleplay && !skipFilter) {
         const actionable = await shouldRespond(text);
         if (!actionable) {
           log.debug("prefilter blocked message, sending to review channel", { channelJid, text: text.slice(0, 80) });
@@ -1705,7 +1708,7 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
             memoryHint,
             "Also call the relevant ZW2 tools to fetch fresh data when the question involves orders, pricing, or SOW.",
             "If a write tool is blocked, do NOT retry it. Just say you cannot complete that action right now.",
-            "ALWAYS respond to the customer — even if the message is vague, conversational, or not a direct question. This is a real customer; never ignore them. NEVER output [NO_RESPONSE].",
+            "ALWAYS respond to the customer — even if the message is vague, conversational, or not a direct question. This is a real customer; never ignore them. NEVER output [NO_RESPONSE] or NO_REPLY.",
             "Give a short, direct answer with the actual data. No filler, no preamble. Just the facts in 2-4 sentences, conversational tone.",
             `Customer (${senderName}): ${text}`,
           ].join("\n")
@@ -1723,14 +1726,18 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
             "STEP 1 (MANDATORY): You MUST call memory_search with the user's message BEFORE doing anything else. Do NOT skip this step. Do NOT output ANY text before calling memory_search — not even [NO_RESPONSE].",
             memoryHint,
             "Also call the relevant ZW2 tools to fetch fresh data when the question involves orders, pricing, or SOW.",
-            "If a write tool is blocked, do NOT retry it and do NOT mention 'pending approval' in your response. Just respond with [NO_RESPONSE].",
             "Give the actual data in your response. No filler, no preamble like 'let me look that up' or 'I have data from earlier'. Just the facts.",
             "IMPORTANT: If the message contains a REQUEST or ACTION (e.g. 'looking to get an estimate', 'can you check', 'I need help with'), treat it as a question — answer it or ask a clarifying question. Do NOT classify requests as customer context.",
             "ONLY if the message is PURELY informational with no request (e.g. 'we have 500 users on Microsoft Teams'), respond with [CUSTOMER_CONTEXT] followed by each fact on its own line. Example:",
             "  [CUSTOMER_CONTEXT]",
             "  500 users",
             "  Using Microsoft Teams currently",
-            "ONLY after calling memory_search: if the message is NOT a question, NOT a request, AND NOT customer context (casual chat, greeting, acknowledgment, small talk), respond with exactly [NO_RESPONSE] and nothing else.",
+            prefilterEnabled
+              ? "If a write tool is blocked, do NOT retry it and do NOT mention 'pending approval' in your response. Just respond with [NO_RESPONSE]."
+              : "If a write tool is blocked, explain briefly that you cannot complete that action right now.",
+            prefilterEnabled
+              ? "ONLY after calling memory_search: if the message is NOT a question, NOT a request, AND NOT customer context (casual chat, greeting, acknowledgment, small talk), respond with exactly [NO_RESPONSE] and nothing else."
+              : "ALWAYS respond to the user, including greetings and acknowledgments. For casual small talk, send one short friendly acknowledgment. NEVER output [NO_RESPONSE] or NO_REPLY.",
             "If it IS a new question or request with no matching memory_search results, respond with ONE short clarifying question (1 sentence) to narrow down what they need.",
             `User message: ${text}`,
           ].join("\n");
@@ -1839,12 +1846,17 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
       // emitted before calling tools.  Only treat as no-response if nothing meaningful
       // remains after stripping.
       const rawReply = collectedParts.join("\n").trim();
-      const fullReply = rawReply.replace(/\[NO_RESPONSE\]/gi, "").trim();
+      let fullReply = rawReply.replace(/\[NO_RESPONSE\]/gi, "").trim();
       log.info("observe mode: collectedParts", { count: collectedParts.length, rawLen: rawReply.length, cleanLen: fullReply.length, snippet: fullReply.slice(0, 120) });
 
       // If no reply or only [NO_RESPONSE] tags remain, send to review channel for visibility
       // skipFilter=true means a reviewer already allowed this message — post it directly
       if (!skipFilter && !fullReply) {
+        if (!prefilterEnabled) {
+          // Classifier is disabled; keep the workflow moving with a deterministic fallback.
+          fullReply = "Happy to help. What would you like me to check?";
+          log.warn("observe mode: empty reply while prefilter disabled, using fallback", { channelJid });
+        } else {
         log.debug("observe mode: not a question, routing to review channel", { channelJid });
         const skippedAgent = resolveAgentSpeakerName(cfg, route.agentId) ?? "Agent";
         const refId = storePrefilterBlock({
@@ -1875,6 +1887,7 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
           isChannel: true,
         });
         return;
+        }
       }
 
       // If the agent detected customer context/environment details, persist them
@@ -2040,6 +2053,9 @@ export async function routeMessageToAgent(params: {
   channelName?: string;
   threadContext?: ZoomInboundThreadContext;
   replyToMessageId?: string;
+  sessionKeyOverride?: string;
+  agentIdOverride?: string;
+  accountIdOverride?: string;
 }): Promise<void> {
   const {
     deps,
@@ -2052,6 +2068,9 @@ export async function routeMessageToAgent(params: {
     channelName,
     threadContext,
     replyToMessageId,
+    sessionKeyOverride,
+    agentIdOverride,
+    accountIdOverride,
   } = params;
   const { cfg, log } = deps;
   const core = getZoomRuntime();
@@ -2077,12 +2096,20 @@ export async function routeMessageToAgent(params: {
       threadContext,
       log,
     });
+    const resolvedAgentId = agentIdOverride?.trim() || route.agentId;
+    const resolvedAccountId = accountIdOverride?.trim() || route.accountId;
+    const resolvedSessionKey = sessionKeyOverride?.trim() || route.sessionKey;
     const resolvedReplyToMessageId = resolveZoomReplyMainMessageId({
       threading,
       threadContext,
       explicitReplyMainMessageId: replyToMessageId,
     });
-    const speakerName = resolveAgentSpeakerName(cfg, route.agentId);
+    rememberZoomSessionReplyRoot({
+      sessionKey: resolvedSessionKey,
+      threadContext,
+      explicitReplyMainMessageId: resolvedReplyToMessageId,
+    });
+    const speakerName = resolveAgentSpeakerName(cfg, resolvedAgentId);
 
     const ctxPayload = core.channel.reply.finalizeInboundContext({
       Body: text,
@@ -2090,8 +2117,8 @@ export async function routeMessageToAgent(params: {
       CommandBody: text,
       From: isDirect ? `zoom:${senderId}` : `zoom:channel:${channelJid}`,
       To: conversationId,
-      SessionKey: route.sessionKey,
-      AccountId: route.accountId,
+      SessionKey: resolvedSessionKey,
+      AccountId: resolvedAccountId,
       ChatType: isDirect ? "direct" : "channel",
       ConversationLabel: senderName ?? senderId,
       SenderName: senderName,
@@ -2113,7 +2140,7 @@ export async function routeMessageToAgent(params: {
 
     const { dispatcher, replyOptions, markDispatchIdle } =
       core.channel.reply.createReplyDispatcherWithTyping({
-        humanDelay: core.channel.reply.resolveHumanDelayConfig(cfg, route.agentId),
+        humanDelay: core.channel.reply.resolveHumanDelayConfig(cfg, resolvedAgentId),
         deliver: async (payload) => {
           const { sendZoomTextMessage } = await import("./send.js");
           if (payload.text) {

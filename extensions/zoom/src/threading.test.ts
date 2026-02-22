@@ -237,4 +237,29 @@ describe("resolveZoomOutboundReplyMessageId", () => {
       }),
     ).toBe("manual_target");
   });
+
+  it("falls back to resolved thread id when reply-to-current has no incoming id", () => {
+    expect(
+      resolveZoomOutboundReplyMessageId({
+        threadContext: {
+          incomingMessageId: undefined,
+          parentMessageId: "parent_msg",
+          isThreadReply: true,
+          threadId: "parent_msg",
+        },
+        resolvedReplyMainMessageId: "parent_msg",
+        payloadReplyToCurrent: true,
+      }),
+    ).toBe("parent_msg");
+  });
+
+  it("falls back to resolved reply id when context is missing", () => {
+    expect(
+      resolveZoomOutboundReplyMessageId({
+        threadContext: undefined,
+        resolvedReplyMainMessageId: "thread_root",
+        payloadReplyToCurrent: true,
+      }),
+    ).toBe("thread_root");
+  });
 });

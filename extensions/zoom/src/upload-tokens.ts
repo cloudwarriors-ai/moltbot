@@ -16,6 +16,13 @@ export type UploadToken = {
   isDirect: boolean;
   channelJid?: string;
   channelName?: string;
+  /** Preserve the originating session so upload completion routes to the same agent/session. */
+  sessionKey?: string;
+  /** Optional route hints captured when upload was requested. */
+  agentId?: string;
+  accountId?: string;
+  /** Thread root message id to keep upload follow-ups in the same Zoom thread. */
+  replyMainMessageId?: string;
   /** Context label for naming uploaded files, e.g. "PROJ-1234" */
   label?: string;
   expiresAt: number;
