@@ -1,0 +1,69 @@
+{
+  "id": "catfish",
+  "name": "Catfish",
+  "description": "Privileged Zoom Team Chat impersonation sender",
+  "uiHints": {
+    "clientId": {
+      "label": "Zoom Client ID",
+      "help": "Dedicated Catfish S2S OAuth client id (or CATFISH_ZOOM_CLIENT_ID)."
+    },
+    "clientSecret": {
+      "label": "Zoom Client Secret",
+      "help": "Dedicated Catfish S2S OAuth client secret (or CATFISH_ZOOM_CLIENT_SECRET)."
+    },
+    "accountId": {
+      "label": "Zoom Account ID",
+      "help": "Zoom account id for account_credentials grant (or CATFISH_ZOOM_ACCOUNT_ID)."
+    },
+    "requiredScopes": {
+      "label": "Required Scopes",
+      "help": "Required OAuth scopes. Defaults to teamchat:admin:write and team_chat:write:user_message:admin."
+    },
+    "auditLogPath": {
+      "label": "Audit Log Path",
+      "help": "Optional absolute path for Catfish JSONL audit records."
+    }
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "clientId": {
+        "type": "string"
+      },
+      "clientSecret": {
+        "type": "string"
+      },
+      "accountId": {
+        "type": "string"
+      },
+      "requiredScope": {
+        "type": "string"
+      },
+      "requiredScopes": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "oauthBaseUrl": {
+        "type": "string"
+      },
+      "apiBaseUrl": {
+        "type": "string"
+      },
+      "usersListPageSize": {
+        "type": "number"
+      },
+      "usersListMaxPages": {
+        "type": "number"
+      },
+      "cacheTtlMs": {
+        "type": "number"
+      },
+      "auditLogPath": {
+        "type": "string"
+      }
+    }
+  }
+}

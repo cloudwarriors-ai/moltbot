@@ -190,6 +190,10 @@
   - changed-files:
       - any-glob-to-any-file:
           - "extensions/copilot-proxy/**"
+"extensions: catfish":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "extensions/catfish/**"
 "extensions: diagnostics-otel":
   - changed-files:
       - any-glob-to-any-file:
