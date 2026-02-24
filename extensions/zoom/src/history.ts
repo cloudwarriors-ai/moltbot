@@ -34,6 +34,9 @@ type ParsedHistory = {
   messageCount: number;
   dateRange: { first: string; last: string };
 };
+type HistoryIngestOptions = {
+  workspaceDir?: string;
+};
 
 /**
  * Main entry point — fetch channel history, extract Q&A patterns, write training file.
@@ -44,6 +47,7 @@ export async function fetchAndTrainFromHistory(
   channelName: string | undefined,
   creds: ZoomCredentials,
   log: ZoomMonitorLogger,
+  options: HistoryIngestOptions = {},
 ): Promise<void> {
   const label = channelName ?? channelJid;
   log.info(`history ingest: starting for ${label}`);
@@ -69,7 +73,7 @@ export async function fetchAndTrainFromHistory(
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-|-$/g, "") || "unknown";
 
-  await writeChannelTraining(slug, training, channelName, channelJid);
+  await writeChannelTraining(slug, training, channelName, channelJid, options.workspaceDir);
   log.info(`history ingest: wrote training.md for ${label} (${parsed.pairs.length} Q&A pairs)`);
 }
 
@@ -81,6 +85,7 @@ export async function trainFromCsvFile(
   csvPath: string,
   channelName: string,
   log: ZoomMonitorLogger,
+  options: HistoryIngestOptions = {},
 ): Promise<void> {
   log.info(`csv ingest: reading ${csvPath}`);
   const raw = await fs.readFile(csvPath, "utf-8");
@@ -111,7 +116,7 @@ export async function trainFromCsvFile(
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-|-$/g, "") || "unknown";
 
-  await writeChannelTraining(slug, training, channelName);
+  await writeChannelTraining(slug, training, channelName, undefined, options.workspaceDir);
   log.info(`csv ingest: wrote training.md for ${channelName} (${parsed.pairs.length} Q&A pairs, ${actionExamples.length} actions)`);
 }
 

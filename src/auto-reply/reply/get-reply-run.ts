@@ -21,6 +21,7 @@ import {
   type SessionEntry,
   updateSessionStore,
 } from "../../config/sessions.js";
+import { normalizeChannelSlug } from "../../channels/channel-config.js";
 import { logVerbose } from "../../globals.js";
 import { clearCommandLane, getQueueSize } from "../../process/command-queue.js";
 import { normalizeMainKey } from "../../routing/session-key.js";
@@ -50,6 +51,19 @@ import { appendUntrustedContext } from "./untrusted-context.js";
 
 type AgentDefaults = NonNullable<OpenClawConfig["agents"]>["defaults"];
 type ExecOverrides = Pick<ExecToolDefaults, "host" | "security" | "ask" | "node">;
+
+function resolveMemoryChannelSlug(sessionCtx: TemplateContext): string | undefined {
+  const explicit = sessionCtx.ChannelSlug?.trim();
+  if (explicit) {
+    return explicit;
+  }
+  const fromGroupSubject = sessionCtx.GroupSubject?.trim();
+  if (!fromGroupSubject) {
+    return undefined;
+  }
+  const normalized = normalizeChannelSlug(fromGroupSubject);
+  return normalized || undefined;
+}
 
 type RunPreparedReplyParams = {
   ctx: MsgContext;
@@ -383,6 +397,10 @@ export async function runPreparedReply(
     isNewSession,
   });
   const authProfileIdSource = sessionEntry?.authProfileOverrideSource;
+  const channelSlug = resolveMemoryChannelSlug(sessionCtx);
+  const defaultMemoryScope =
+    (sessionCtx.DefaultMemoryScope as import("../../memory/types.js").MemorySearchScope) ||
+    (channelSlug ? "channel" : undefined);
   const followupRun = {
     prompt: queuedBody,
     messageId: sessionCtx.MessageSidFull ?? sessionCtx.MessageSid,
@@ -432,9 +450,9 @@ export async function runPreparedReply(
       ownerNumbers: command.ownerList.length > 0 ? command.ownerList : undefined,
       extraSystemPrompt: extraSystemPrompt || undefined,
       ...(isReasoningTagProvider(provider) ? { enforceFinalTag: true } : {}),
-      channelSlug: sessionCtx.ChannelSlug || undefined,
+      channelSlug,
       isSupport: sessionCtx.IsSupport || undefined,
-      defaultMemoryScope: (sessionCtx.DefaultMemoryScope as import("../../memory/types.js").MemorySearchScope) || undefined,
+      defaultMemoryScope,
       allowAllCustomersMemoryScope: sessionCtx.AllowAllCustomersMemoryScope || undefined,
       excludeMemorySlugs: sessionCtx.ExcludeMemorySlugs,
     },

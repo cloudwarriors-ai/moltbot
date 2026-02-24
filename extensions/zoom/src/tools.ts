@@ -10,7 +10,7 @@ import { createUploadToken } from "./upload-tokens.js";
 import { resolveZoomUploadDir } from "./upload-path.js";
 import { getRememberedZoomSessionReplyRoot } from "./thread-state.js";
 
-function resolveUploadReplyMainMessageId(sessionKey?: string): string | undefined {
+function resolveSessionReplyMainMessageId(sessionKey?: string): string | undefined {
   const rememberedReplyRoot = getRememberedZoomSessionReplyRoot(sessionKey);
   if (rememberedReplyRoot) return rememberedReplyRoot;
 
@@ -111,10 +111,10 @@ export function registerZoomTools(api: OpenClawPluginApi) {
     return {
       name: "zoom_send_dm",
       description:
-        "Send a direct message to a Zoom user by their JID. " +
+        "Send a direct message to a Zoom user (JID preferred; email/name best-effort). " +
         "Use this to redirect a conversation from a channel to a private DM.",
       parameters: Type.Object({
-        user_jid: Type.String({ description: "The user's JID to DM" }),
+        user_jid: Type.String({ description: "Recipient identifier: Zoom user JID (preferred), or email/name" }),
         message: Type.String({ description: "Message text to send" }),
         heading: Type.Optional(Type.String({ description: "Message heading (default: OpenClaw)" })),
       }),
@@ -164,6 +164,165 @@ export function registerZoomTools(api: OpenClawPluginApi) {
                 messageId: result.messageId,
                 to: result.conversationId,
               }),
+            },
+          ],
+        };
+      },
+    };
+  });
+
+  // zoom_lookup_user - resolve email/name/JID to likely Zoom user JIDs
+  api.registerTool((ctx) => {
+    if (ctx.messageChannel !== "zoom") return null;
+    return {
+      name: "zoom_lookup_user",
+      description:
+        "Lookup Zoom users by email, name, or JID and return likely JID matches. " +
+        "Uses recent conversation history and (if configured) Zoom account user directory scopes.",
+      parameters: Type.Object({
+        query: Type.String({ description: "Email, display name, or JID to resolve" }),
+        limit: Type.Optional(Type.Number({ description: "Maximum results (default 5)" })),
+      }),
+      async execute(_id: string, params: Record<string, unknown>) {
+        const { lookupZoomUsers } = await import("./user-directory.js");
+        const query = String(params.query ?? "").trim();
+        const limitRaw = Number(params.limit ?? 5);
+        const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(20, Math.floor(limitRaw))) : 5;
+
+        const hits = await lookupZoomUsers(query);
+        const topHits = hits.slice(0, limit);
+        const recommendedJid = topHits.length > 0 ? topHits[0].userJid : null;
+
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({
+                ok: true,
+                query,
+                recommendedJid,
+                results: topHits,
+              }),
+            },
+          ],
+        };
+      },
+    };
+  });
+
+  // zoom_send_as_user - send chat messages via user/admin Team Chat scopes
+  api.registerTool((ctx) => {
+    if (ctx.messageChannel !== "zoom") return null;
+    return {
+      name: "zoom_send_as_user",
+      description:
+        "Send a Zoom chat message as a user using Team Chat admin user-message scopes. " +
+        "Supports DM via to_contact (email/JID) or channel post via to_channel. " +
+        "For mentions, use <@email>, <@name>, <@jid>, and @all in message. " +
+        "When mentions exist and from_user is omitted, MENTION_PROXY is used if set.",
+      parameters: Type.Object({
+        message: Type.String({ description: "Message text to send" }),
+        from_user: Type.Optional(
+          Type.String({
+            description: "Sender user email/ID (defaults to ZOOM_REPORT_USER)",
+          }),
+        ),
+        to_contact: Type.Optional(
+          Type.String({ description: "DM recipient email or JID" }),
+        ),
+        to_channel: Type.Optional(
+          Type.String({ description: "Channel ID or channel JID (...@conference.xmpp.zoom.us)" }),
+        ),
+      }),
+      async execute(_id: string, params: Record<string, unknown>) {
+        const { sendZoomMessageAsUser } = await import("./user-directory.js");
+        const message = String(params.message ?? "");
+        const fromUser = typeof params.from_user === "string" ? params.from_user : undefined;
+        const toContact = typeof params.to_contact === "string" ? params.to_contact : undefined;
+        const toChannel = typeof params.to_channel === "string" ? params.to_channel : undefined;
+        const replyMainMessageId = resolveSessionReplyMainMessageId(ctx.sessionKey);
+
+        const result = await sendZoomMessageAsUser({
+          fromUser,
+          toContact,
+          toChannel,
+          message,
+          replyMainMessageId,
+        });
+
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({ ok: true, result }),
+            },
+          ],
+        };
+      },
+    };
+  });
+
+  // zoom_send_at_message - send message with explicit @mentions
+  api.registerTool((ctx) => {
+    if (ctx.messageChannel !== "zoom") return null;
+    return {
+      name: "zoom_send_at_message",
+      description:
+        "Send a Zoom message as a user with @mentions. " +
+        "Mentions are resolved from email/name/JID and rendered as clickable mentions. " +
+        "When from_user is omitted, MENTION_PROXY is used if set.",
+      parameters: Type.Object({
+        mentions: Type.Array(
+          Type.String({ description: "User email, display name, or JID to mention" }),
+          { description: "Users to mention in the message" },
+        ),
+        message: Type.String({ description: "Message text following mentions" }),
+        mention_all: Type.Optional(Type.Boolean({ description: "Also include @all mention (default: false)" })),
+        from_user: Type.Optional(
+          Type.String({ description: "Sender user email/ID (defaults to ZOOM_REPORT_USER)" }),
+        ),
+        to_contact: Type.Optional(
+          Type.String({ description: "DM recipient email or JID (exclusive with to_channel)" }),
+        ),
+        to_channel: Type.Optional(
+          Type.String({ description: "Channel ID or channel JID (...@conference.xmpp.zoom.us)" }),
+        ),
+      }),
+      async execute(_id: string, params: Record<string, unknown>) {
+        const { sendZoomMessageAsUser } = await import("./user-directory.js");
+        const mentions = Array.isArray(params.mentions)
+          ? params.mentions.map((m) => String(m).trim()).filter(Boolean)
+          : [];
+        const message = String(params.message ?? "").trim();
+        const mentionAll = Boolean(params.mention_all);
+        const fromUser = typeof params.from_user === "string" ? params.from_user : undefined;
+        const toContact = typeof params.to_contact === "string" ? params.to_contact : undefined;
+        const toChannel = typeof params.to_channel === "string" ? params.to_channel : undefined;
+        const replyMainMessageId = resolveSessionReplyMainMessageId(ctx.sessionKey);
+
+        if (mentions.length === 0 && !mentionAll) {
+          throw new Error("Provide at least one mention or set mention_all=true.");
+        }
+
+        const mentionPrefix = [
+          ...mentions.map((m) => `<@${m}>`),
+          ...(mentionAll ? ["@all"] : []),
+        ].join(" ");
+        const text = `${mentionPrefix}${message ? ` ${message}` : ""}`.trim();
+
+        const result = await sendZoomMessageAsUser({
+          fromUser,
+          toContact,
+          toChannel,
+          message: text,
+          replyMainMessageId,
+        });
+
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({ ok: true, result }),
             },
           ],
         };
@@ -311,7 +470,7 @@ export function registerZoomTools(api: OpenClawPluginApi) {
           sessionKey: ctx.sessionKey,
           agentId: ctx.agentId,
           accountId: ctx.agentAccountId,
-          replyMainMessageId: resolveUploadReplyMainMessageId(ctx.sessionKey),
+          replyMainMessageId: resolveSessionReplyMainMessageId(ctx.sessionKey),
           label,
         });
 

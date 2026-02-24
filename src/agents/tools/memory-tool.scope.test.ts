@@ -1,10 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 let searchCalledWith: Record<string, unknown> | undefined;
+let searchCallHistory: Array<Record<string, unknown> | undefined> = [];
 
 const stubManager = {
   search: vi.fn(async (_query: string, opts?: Record<string, unknown>) => {
     searchCalledWith = opts;
+    searchCallHistory.push(opts);
     return [
       {
         path: "memory/customers/acme/notes.md",
@@ -46,6 +48,7 @@ const baseCfg = { memory: { citations: "off" }, agents: { list: [{ id: "main", d
 beforeEach(() => {
   vi.clearAllMocks();
   searchCalledWith = undefined;
+  searchCallHistory = [];
 });
 
 describe("memory_search scope policy", () => {
@@ -116,13 +119,23 @@ describe("memory_search scope policy", () => {
     expect(searchCalledWith?.scope).toBe("all-customers");
   });
 
-  it("forces global for non-support sessions requesting channel", async () => {
+  it("allows channel scope for non-support sessions when channelSlug is present", async () => {
     const tool = createMemorySearchTool({
       config: baseCfg,
       isSupport: false,
       channelSlug: "acme-corp",
     });
     const result = await tool!.execute("call6", { query: "test", scope: "channel" });
+    const details = result.details as Record<string, unknown>;
+    expect(details.effectiveScope).toBe("channel");
+  });
+
+  it("forces global for non-support sessions requesting channel without slug", async () => {
+    const tool = createMemorySearchTool({
+      config: baseCfg,
+      isSupport: false,
+    });
+    const result = await tool!.execute("call6b", { query: "test", scope: "channel" });
     const details = result.details as Record<string, unknown>;
     expect(details.effectiveScope).toBe("global");
   });
@@ -148,5 +161,40 @@ describe("memory_search scope policy", () => {
     const details = result.details as Record<string, unknown>;
     // Falls back to defaultScope
     expect(details.effectiveScope).toBe("channel");
+  });
+
+  it("retries empty channel results with relaxed minScore when minScore is not explicit", async () => {
+    stubManager.search.mockImplementation(async (_query: string, opts?: Record<string, unknown>) => {
+      searchCalledWith = opts;
+      searchCallHistory.push(opts);
+      if (opts?.minScore === 0.3) {
+        return [
+          {
+            path: "memory/customers/acme/notes.md",
+            startLine: 1,
+            endLine: 3,
+            score: 0.31,
+            snippet: "Acme asks for engineer call support",
+            source: "memory" as const,
+          },
+        ];
+      }
+      return [];
+    });
+
+    const tool = createMemorySearchTool({
+      config: baseCfg,
+      channelSlug: "acme-corp",
+      defaultScope: "channel",
+    });
+    const result = await tool!.execute("call9", { query: "engineer call", scope: "channel" });
+    const details = result.details as Record<string, unknown>;
+    const results = details.results as Array<Record<string, unknown>>;
+
+    expect(searchCallHistory.length).toBe(2);
+    expect(searchCallHistory[0]?.minScore).toBeUndefined();
+    expect(searchCallHistory[1]?.minScore).toBe(0.3);
+    expect(results.length).toBe(1);
+    expect(details.relaxedMinScore).toBe(0.3);
   });
 });

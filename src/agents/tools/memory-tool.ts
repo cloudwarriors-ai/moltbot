@@ -83,9 +83,12 @@ export function createMemorySearchTool(options: {
     sessionKey: options.agentSessionKey,
     config: cfg,
   });
-  if (!resolveMemorySearchConfig(cfg, agentId)) {
+  const searchConfig = resolveMemorySearchConfig(cfg, agentId);
+  if (!searchConfig) {
     return null;
   }
+  const configuredMinScore = searchConfig.query.minScore;
+  const relaxedChannelMinScore = Math.max(0, Math.min(configuredMinScore, 0.3));
   return {
     label: "Memory Search",
     name: "memory_search",
@@ -129,7 +132,7 @@ export function createMemorySearchTool(options: {
           mode: citationsMode,
           sessionKey: options.agentSessionKey,
         });
-        const rawResults = await manager.search(query, {
+        let rawResults = await manager.search(query, {
           maxResults,
           minScore,
           sessionKey: options.agentSessionKey,
@@ -137,6 +140,25 @@ export function createMemorySearchTool(options: {
           channelSlug: options.channelSlug,
           excludeSlugs: effectiveScope === "all-customers" ? options.excludeSlugs : undefined,
         });
+        let relaxedMinScore: number | undefined;
+        if (
+          rawResults.length === 0 &&
+          minScore === undefined &&
+          effectiveScope === "channel" &&
+          relaxedChannelMinScore < configuredMinScore
+        ) {
+          rawResults = await manager.search(query, {
+            maxResults,
+            minScore: relaxedChannelMinScore,
+            sessionKey: options.agentSessionKey,
+            scope: effectiveScope,
+            channelSlug: options.channelSlug,
+            excludeSlugs: undefined,
+          });
+          if (rawResults.length > 0) {
+            relaxedMinScore = relaxedChannelMinScore;
+          }
+        }
         const status = manager.status();
         const decorated = decorateCitations(rawResults, includeCitations);
         const resolved = resolveMemoryBackendConfig({ cfg, agentId });
@@ -153,6 +175,7 @@ export function createMemorySearchTool(options: {
           effectiveScope,
           requestedScope: requestedScope ?? options.defaultScope ?? "global",
           scopeDenied: false,
+          ...(relaxedMinScore !== undefined ? { relaxedMinScore } : {}),
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);

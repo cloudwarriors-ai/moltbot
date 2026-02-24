@@ -1,15 +1,30 @@
 import fs from "node:fs";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import type { Request, Response } from "express";
 
 import type { ZoomMessageHandlerDeps } from "./monitor-handler.js";
 import { routeMessageToAgent } from "./monitor-handler.js";
-import { copyDocToCustomer, ensureCustomerDir } from "./channel-memory.js";
+import {
+  copyDocToCustomer,
+  ensureCustomerDir,
+  resolveWorkspaceDirForAgent,
+} from "./channel-memory.js";
 import { getUploadErrorHtml, getUploadPageHtml } from "./upload-page.js";
 import { resolveZoomUploadDir } from "./upload-path.js";
 import { consumeUploadToken, peekUploadToken } from "./upload-tokens.js";
 
 const UPLOAD_DIR = resolveZoomUploadDir();
+const MAX_PREVIEW_BYTES = 2000;
+const MAX_PDF_PREVIEW_CHARS = 3000;
+const MAX_PDF_PREVIEW_LINES = 40;
+const DEFAULT_EXEC_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+const PDFTOTEXT_CANDIDATES = Array.from(new Set([
+  process.env.PDFTOTEXT_BIN,
+  "/usr/bin/pdftotext",
+  "/usr/local/bin/pdftotext",
+  "pdftotext",
+].filter((entry): entry is string => Boolean(entry))));
 
 function ensureDir(dir: string): void {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -67,10 +82,62 @@ export function createUploadRoutes(deps: ZoomMessageHandlerDeps) {
 
       // Never inline full file content — large files kill the LLM context.
       // Save the file, tell the agent where it is with a short preview.
-      const MAX_PREVIEW_BYTES = 2000;
       let agentText: string;
       if (mime.startsWith("image/")) {
         agentText = `[FILE_UPLOAD image] ${safeName} (${mime}, ${sizeKB}KB) saved to ${filePath}`;
+      } else if (mime === "application/pdf" || /\.pdf$/i.test(safeName)) {
+        // Prefer extracting a compact PDF preview at upload time so the model
+        // can proceed without needing privileged exec tools in-chat.
+        let pdfText = "";
+        let extractionDetails = "";
+        for (const bin of PDFTOTEXT_CANDIDATES) {
+          try {
+            const result = spawnSync(bin, [filePath, "-"], {
+              encoding: "utf-8",
+              timeout: 8000,
+              maxBuffer: 2 * 1024 * 1024,
+              env: { ...process.env, PATH: [process.env.PATH, DEFAULT_EXEC_PATH].filter(Boolean).join(":") },
+            });
+            if (result.status === 0 && result.stdout) {
+              pdfText = String(result.stdout);
+              extractionDetails = `ok bin=${bin} chars=${pdfText.length}`;
+              break;
+            }
+            const stderr = result.stderr ? String(result.stderr).trim().slice(0, 220) : "";
+            const err = result.error ? String(result.error) : "";
+            extractionDetails = [
+              `bin=${bin}`,
+              `status=${result.status ?? "null"}`,
+              `signal=${result.signal ?? "none"}`,
+              err ? `error=${err}` : "",
+              stderr ? `stderr=${stderr}` : "",
+            ].filter(Boolean).join(" ");
+          } catch (err) {
+            extractionDetails = `bin=${bin} threw=${String(err)}`;
+          }
+        }
+
+        if (pdfText.trim().length > 0) {
+          const normalized = pdfText.replace(/\r\n/g, "\n").trim();
+          const sliced = normalized.slice(0, MAX_PDF_PREVIEW_CHARS);
+          const lines = sliced.split("\n").slice(0, MAX_PDF_PREVIEW_LINES);
+          const preview = lines.join("\n");
+          const truncatedByChars = normalized.length > sliced.length;
+          const truncatedByLines = sliced.split("\n").length > lines.length;
+          const truncated = (truncatedByChars || truncatedByLines)
+            ? `\n\n_(truncated — full PDF is ${sizeKB}KB, use \`exec pdftotext \"${filePath}\" -\` for full text)_`
+            : "";
+          const totalLines = normalized.split("\n").length;
+          agentText = `[FILE_UPLOAD pdf] ${safeName} (${sizeKB}KB, ${totalLines} text lines) saved to ${filePath}\n\nPreview (first ${lines.length} lines):\n${preview}${truncated}`;
+        } else {
+          log.warn("pdf text extraction unavailable", {
+            filePath,
+            mime,
+            path: process.env.PATH,
+            details: extractionDetails || "all candidates failed",
+          });
+          agentText = `[FILE_UPLOAD pdf] ${safeName} (${sizeKB}KB) saved to ${filePath}\n\nText extraction unavailable.`;
+        }
       } else if (
         mime === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
         /\.docx$/i.test(safeName)
@@ -99,8 +166,9 @@ export function createUploadRoutes(deps: ZoomMessageHandlerDeps) {
       if (ctx.channelName) {
         const slug = ctx.channelName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "unknown";
         try {
-          await ensureCustomerDir(slug, ctx.channelName, ctx.channelJid);
-          await copyDocToCustomer(slug, filePath, safeName);
+          const workspaceDir = resolveWorkspaceDirForAgent(cfg, ctx.agentId);
+          await ensureCustomerDir(slug, ctx.channelName, ctx.channelJid, workspaceDir);
+          await copyDocToCustomer(slug, filePath, safeName, workspaceDir);
         } catch (copyErr) {
           log.error("failed to copy upload to customer dir", { error: String(copyErr) });
         }

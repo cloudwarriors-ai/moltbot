@@ -106,6 +106,7 @@
     "test:live": "OPENCLAW_LIVE_TEST=1 CLAWDBOT_LIVE_TEST=1 vitest run --config vitest.live.config.ts",
     "test:macmini": "OPENCLAW_TEST_VM_FORKS=0 OPENCLAW_TEST_PROFILE=serial node scripts/test-parallel.mjs",
     "test:ui": "pnpm --dir ui test",
+    "test:zoom:harness": "node --import tsx scripts/zoom-pulsebot-harness.ts --scenarios scripts/zoom-pulsebot-harness.scenarios.json",
     "test:watch": "vitest",
     "tsgo:test": "tsgo -p tsconfig.test.json",
     "tui": "node scripts/run-node.mjs tui",

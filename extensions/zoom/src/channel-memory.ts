@@ -1,9 +1,61 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import type { OpenClawConfig } from "openclaw/plugin-sdk";
 
-const WORKSPACE_DIR = process.env.OPENCLAW_HOME
-  ? path.join(process.env.OPENCLAW_HOME, "workspace")
-  : path.join(process.env.HOME ?? "/root", ".openclaw", "workspace");
+function resolveUserPath(input: string): string {
+  const trimmed = input.trim();
+  if (!trimmed) return trimmed;
+  if (trimmed.startsWith("~")) {
+    const suffix = trimmed.startsWith("~/") ? trimmed.slice(2) : trimmed.slice(1);
+    return path.resolve(path.join(process.env.HOME ?? "/root", suffix));
+  }
+  return path.resolve(trimmed);
+}
+
+function resolveStateDir(): string {
+  const override = process.env.OPENCLAW_STATE_DIR?.trim() || process.env.CLAWDBOT_STATE_DIR?.trim();
+  if (override) return resolveUserPath(override);
+  const openclawHome = process.env.OPENCLAW_HOME?.trim();
+  if (openclawHome) return resolveUserPath(openclawHome);
+  return path.join(process.env.HOME ?? "/root", ".openclaw");
+}
+
+const DEFAULT_WORKSPACE_DIR = path.join(resolveStateDir(), "workspace");
+
+function normalizeAgentId(agentId?: string): string {
+  const value = (agentId ?? "").trim().toLowerCase();
+  return value || "main";
+}
+
+function resolveDefaultAgentId(cfg: OpenClawConfig): string {
+  const list = Array.isArray(cfg.agents?.list) ? cfg.agents.list : [];
+  if (list.length === 0) return "main";
+  const defaultEntry = list.find((entry) => entry?.default && typeof entry.id === "string");
+  const fallback = defaultEntry ?? list.find((entry) => typeof entry?.id === "string");
+  return normalizeAgentId(fallback?.id);
+}
+
+export function resolveWorkspaceDirForAgent(cfg: OpenClawConfig, agentId?: string): string {
+  const resolvedId = normalizeAgentId(agentId || resolveDefaultAgentId(cfg));
+  const list = Array.isArray(cfg.agents?.list) ? cfg.agents.list : [];
+  const entry = list.find((candidate) => normalizeAgentId(candidate?.id) === resolvedId);
+  const configuredWorkspace = typeof entry?.workspace === "string" ? entry.workspace.trim() : "";
+  if (configuredWorkspace) {
+    return resolveUserPath(configuredWorkspace);
+  }
+
+  const defaultAgentId = resolveDefaultAgentId(cfg);
+  if (resolvedId === defaultAgentId) {
+    const defaults = cfg.agents?.defaults as { workspace?: string } | undefined;
+    const defaultWorkspace = typeof defaults?.workspace === "string" ? defaults.workspace.trim() : "";
+    if (defaultWorkspace) {
+      return resolveUserPath(defaultWorkspace);
+    }
+    return DEFAULT_WORKSPACE_DIR;
+  }
+
+  return path.join(resolveStateDir(), `workspace-${resolvedId}`);
+}
 
 const PROFILE_MARKER = "<!-- PROFILE_START -->";
 const PROFILE_END_MARKER = "<!-- PROFILE_END -->";
@@ -16,21 +68,26 @@ function sanitizeChannelName(name: string): string {
 // Customer directory helpers
 // ---------------------------------------------------------------------------
 
-function customerDir(slug: string): string {
-  return path.join(WORKSPACE_DIR, "memory", "customers", slug);
+function customerDir(slug: string, workspaceDir?: string): string {
+  return path.join(workspaceDir ?? DEFAULT_WORKSPACE_DIR, "memory", "customers", slug);
 }
 
-function customerIndexPath(slug: string): string {
-  return path.join(customerDir(slug), "index.md");
+function customerIndexPath(slug: string, workspaceDir?: string): string {
+  return path.join(customerDir(slug, workspaceDir), "index.md");
 }
 
 /**
  * Scaffold the customer project directory and write the initial index.md manifest.
  * No-ops if the directory already exists.
  */
-export async function ensureCustomerDir(slug: string, channelName?: string, channelJid?: string): Promise<void> {
-  const dir = customerDir(slug);
-  const indexPath = customerIndexPath(slug);
+export async function ensureCustomerDir(
+  slug: string,
+  channelName?: string,
+  channelJid?: string,
+  workspaceDir?: string,
+): Promise<void> {
+  const dir = customerDir(slug, workspaceDir);
+  const indexPath = customerIndexPath(slug, workspaceDir);
 
   try {
     await fs.access(indexPath);
@@ -69,8 +126,14 @@ export async function ensureCustomerDir(slug: string, channelName?: string, chan
 /**
  * Append an artifact entry to the appropriate section (Orders or Documents) in index.md.
  */
-export async function registerArtifact(slug: string, type: "order" | "document", filename: string, label?: string): Promise<void> {
-  const indexPath = customerIndexPath(slug);
+export async function registerArtifact(
+  slug: string,
+  type: "order" | "document",
+  filename: string,
+  label?: string,
+  workspaceDir?: string,
+): Promise<void> {
+  const indexPath = customerIndexPath(slug, workspaceDir);
   let content: string;
   try {
     content = await fs.readFile(indexPath, "utf-8");
@@ -115,12 +178,17 @@ export async function registerArtifact(slug: string, type: "order" | "document",
 /**
  * Copy an uploaded file into the customer docs directory and register it.
  */
-export async function copyDocToCustomer(slug: string, sourcePath: string, filename: string): Promise<string> {
-  const docsDir = path.join(customerDir(slug), "docs");
+export async function copyDocToCustomer(
+  slug: string,
+  sourcePath: string,
+  filename: string,
+  workspaceDir?: string,
+): Promise<string> {
+  const docsDir = path.join(customerDir(slug, workspaceDir), "docs");
   await fs.mkdir(docsDir, { recursive: true });
   const destPath = path.join(docsDir, filename);
   await fs.copyFile(sourcePath, destPath);
-  await registerArtifact(slug, "document", filename);
+  await registerArtifact(slug, "document", filename, undefined, workspaceDir);
   return destPath;
 }
 
@@ -133,12 +201,19 @@ export async function writeChannelTraining(
   trainingMarkdown: string,
   channelName?: string,
   channelJid?: string,
+  workspaceDir?: string,
 ): Promise<void> {
-  await ensureCustomerDir(slug, channelName, channelJid);
-  const dir = customerDir(slug);
+  await ensureCustomerDir(slug, channelName, channelJid, workspaceDir);
+  const dir = customerDir(slug, workspaceDir);
   const trainingPath = path.join(dir, "training.md");
   await fs.writeFile(trainingPath, trainingMarkdown, "utf-8");
-  await registerArtifact(slug, "document", "training.md", "Channel Training (auto-ingested)");
+  await registerArtifact(
+    slug,
+    "document",
+    "training.md",
+    "Channel Training (auto-ingested)",
+    workspaceDir,
+  );
 }
 
 /**
@@ -150,11 +225,12 @@ export async function writeChannelTraining(
 export async function loadChannelTraining(
   channelName?: string,
   channelJid?: string,
+  workspaceDir?: string,
 ): Promise<string | undefined> {
   const slug = sanitizeChannelName(channelName ?? channelJid?.split("@")[0] ?? "");
   if (!slug) return undefined;
 
-  const dir = customerDir(slug);
+  const dir = customerDir(slug, workspaceDir);
   const parts: string[] = [];
 
   // 1. Load training.md (auto-ingested history Q&A patterns)
@@ -203,19 +279,25 @@ export async function loadChannelTraining(
 // Channel path resolution (migrated to customer dir)
 // ---------------------------------------------------------------------------
 
-const OLD_CHANNELS_DIR = path.join(WORKSPACE_DIR, "memory", "channels");
-
-function resolveChannelPath(channelName: string | undefined, channelJid: string) {
+function resolveChannelPath(channelName: string | undefined, channelJid: string, workspaceDir?: string) {
+  const oldChannelsDir = path.join(workspaceDir ?? DEFAULT_WORKSPACE_DIR, "memory", "channels");
   const fileName = sanitizeChannelName(channelName ?? channelJid.split("@")[0]);
-  const newPath = path.join(customerDir(fileName), "channel.md");
-  const oldPath = path.join(OLD_CHANNELS_DIR, `${fileName}.md`);
+  const newPath = path.join(customerDir(fileName, workspaceDir), "channel.md");
+  const oldPath = path.join(oldChannelsDir, `${fileName}.md`);
   return { fileName, filePath: newPath, oldPath };
 }
 
 /**
  * If the old-style channel file exists, migrate it to the new customer directory.
  */
-async function migrateIfNeeded(slug: string, oldPath: string, newPath: string, channelName?: string, channelJid?: string): Promise<void> {
+async function migrateIfNeeded(
+  slug: string,
+  oldPath: string,
+  newPath: string,
+  channelName?: string,
+  channelJid?: string,
+  workspaceDir?: string,
+): Promise<void> {
   try {
     await fs.access(oldPath);
   } catch {
@@ -223,16 +305,22 @@ async function migrateIfNeeded(slug: string, oldPath: string, newPath: string, c
   }
 
   // Ensure customer dir scaffold exists
-  await ensureCustomerDir(slug, channelName, channelJid);
+  await ensureCustomerDir(slug, channelName, channelJid, workspaceDir);
 
   // Move the file
   await fs.mkdir(path.dirname(newPath), { recursive: true });
   await fs.rename(oldPath, newPath);
 }
 
-async function ensureChannelFile(filePath: string, channelName: string | undefined, fileName: string, channelJid?: string): Promise<void> {
+async function ensureChannelFile(
+  filePath: string,
+  channelName: string | undefined,
+  fileName: string,
+  channelJid?: string,
+  workspaceDir?: string,
+): Promise<void> {
   // Ensure customer directory is scaffolded first
-  await ensureCustomerDir(fileName, channelName, channelJid);
+  await ensureCustomerDir(fileName, channelName, channelJid, workspaceDir);
 
   try {
     await fs.access(filePath);
@@ -263,14 +351,15 @@ export async function persistApprovedQA(params: {
   senderName?: string;
   question: string;
   answer: string;
+  workspaceDir?: string;
 }): Promise<void> {
-  const { channelName, channelJid, senderName, question, answer } = params;
-  const { fileName, filePath, oldPath } = resolveChannelPath(channelName, channelJid);
+  const { channelName, channelJid, senderName, question, answer, workspaceDir } = params;
+  const { fileName, filePath, oldPath } = resolveChannelPath(channelName, channelJid, workspaceDir);
 
   // Migrate old-style file if it exists
-  await migrateIfNeeded(fileName, oldPath, filePath, channelName, channelJid);
+  await migrateIfNeeded(fileName, oldPath, filePath, channelName, channelJid, workspaceDir);
 
-  await ensureChannelFile(filePath, channelName, fileName, channelJid);
+  await ensureChannelFile(filePath, channelName, fileName, channelJid, workspaceDir);
 
   const date = new Date().toISOString().slice(0, 16).replace("T", " ");
   const entry = [
@@ -297,14 +386,15 @@ export async function appendCustomerDetail(params: {
   channelName?: string;
   channelJid: string;
   detail: string;
+  workspaceDir?: string;
 }): Promise<void> {
-  const { channelName, channelJid, detail } = params;
-  const { fileName, filePath, oldPath } = resolveChannelPath(channelName, channelJid);
+  const { channelName, channelJid, detail, workspaceDir } = params;
+  const { fileName, filePath, oldPath } = resolveChannelPath(channelName, channelJid, workspaceDir);
 
   // Migrate old-style file if it exists
-  await migrateIfNeeded(fileName, oldPath, filePath, channelName, channelJid);
+  await migrateIfNeeded(fileName, oldPath, filePath, channelName, channelJid, workspaceDir);
 
-  await ensureChannelFile(filePath, channelName, fileName, channelJid);
+  await ensureChannelFile(filePath, channelName, fileName, channelJid, workspaceDir);
 
   const content = await fs.readFile(filePath, "utf-8");
   const endIdx = content.indexOf(PROFILE_END_MARKER);

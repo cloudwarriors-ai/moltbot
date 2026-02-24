@@ -105,6 +105,7 @@ export interface MemorySearchManager {
       sessionKey?: string;
       scope?: MemorySearchScope;
       channelSlug?: string;
+      excludeSlugs?: string[];
     },
   ): Promise<MemorySearchResult[]>;
   readFile(params: {

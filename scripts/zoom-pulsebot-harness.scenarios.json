@@ -1,0 +1,20 @@
+[
+  {
+    "id": "gh-search-basic",
+    "prompt": "Use gh_search_issues to find recent Project Pulse issues about OAuth failures. Return the top matching issue number and title.",
+    "assertNotContains": [
+      "gh: not found",
+      "command not found"
+    ],
+    "judgeCriteria": "The answer should indicate it attempted GitHub issue search and either provide an issue reference or clearly state no matches."
+  },
+  {
+    "id": "correlate-logs-basic",
+    "prompt": "Run pp_correlate_logs for pattern \"timeout\" and summarize log match count and any related GitHub issues.",
+    "assertNotContains": [
+      "gh: not found",
+      "command not found"
+    ],
+    "judgeCriteria": "The answer should include a correlation summary with log count and issue correlation outcome."
+  }
+]

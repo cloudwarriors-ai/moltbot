@@ -96,7 +96,44 @@ export type ZoomSendErrorClassification = {
   kind: ZoomSendErrorKind;
   statusCode?: number;
   retryAfterMs?: number;
+  detail?: string;
 };
+
+function extractErrorDetail(err: unknown): string | undefined {
+  const raw = formatUnknownError(err);
+  if (!raw) return undefined;
+
+  const trimmed = raw.trim();
+  if (!trimmed) return undefined;
+
+  const parseJsonDetail = (input: string): string | undefined => {
+    try {
+      const parsed = JSON.parse(input) as unknown;
+      if (
+        typeof parsed === "object" &&
+        parsed !== null &&
+        "message" in parsed &&
+        typeof (parsed as { message?: unknown }).message === "string"
+      ) {
+        return ((parsed as { message: string }).message || "").trim() || undefined;
+      }
+      return undefined;
+    } catch {
+      return undefined;
+    }
+  };
+
+  const fullJson = parseJsonDetail(trimmed);
+  if (fullJson) return fullJson;
+
+  const objectStart = trimmed.indexOf("{");
+  if (objectStart >= 0) {
+    const embedded = parseJsonDetail(trimmed.slice(objectStart));
+    if (embedded) return embedded;
+  }
+
+  return trimmed;
+}
 
 /**
  * Classify outbound send errors for safe retries and actionable logs.
@@ -104,9 +141,10 @@ export type ZoomSendErrorClassification = {
 export function classifyZoomSendError(err: unknown): ZoomSendErrorClassification {
   const statusCode = extractStatusCode(err);
   const retryAfterMs = extractRetryAfterMs(err);
+  const detail = extractErrorDetail(err);
 
   if (statusCode === 401 || statusCode === 403) {
-    return { kind: "auth", statusCode };
+    return { kind: "auth", statusCode, detail };
   }
 
   if (statusCode === 429) {
@@ -114,6 +152,7 @@ export function classifyZoomSendError(err: unknown): ZoomSendErrorClassification
       kind: "throttled",
       statusCode,
       retryAfterMs: retryAfterMs ?? undefined,
+      detail,
     };
   }
 
@@ -122,17 +161,19 @@ export function classifyZoomSendError(err: unknown): ZoomSendErrorClassification
       kind: "transient",
       statusCode,
       retryAfterMs: retryAfterMs ?? undefined,
+      detail,
     };
   }
 
   if (statusCode != null && statusCode >= 400) {
-    return { kind: "permanent", statusCode };
+    return { kind: "permanent", statusCode, detail };
   }
 
   return {
     kind: "unknown",
     statusCode: statusCode ?? undefined,
     retryAfterMs: retryAfterMs ?? undefined,
+    detail,
   };
 }
 
@@ -140,6 +181,13 @@ export function formatZoomSendErrorHint(
   classification: ZoomSendErrorClassification,
 ): string | undefined {
   if (classification.kind === "auth") {
+    const detail = classification.detail?.toLowerCase() ?? "";
+    if (detail.includes("no channel or user can be found with the given to_jid")) {
+      return "invalid recipient JID: use the Zoom user's ...@xmpp.zoom.us JID (not email)";
+    }
+    if (detail.includes("deactivated user")) {
+      return "recipient or sender account is deactivated in Zoom";
+    }
     return "check zoom clientId/clientSecret/accountId (or env vars ZOOM_CLIENT_ID/ZOOM_CLIENT_SECRET/ZOOM_ACCOUNT_ID)";
   }
   if (classification.kind === "throttled") {

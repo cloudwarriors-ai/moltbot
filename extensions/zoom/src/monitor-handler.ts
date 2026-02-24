@@ -2,7 +2,7 @@ import type { OpenClawConfig, RuntimeEnv, GroupPolicy } from "openclaw/plugin-sd
 
 import { resolveZoomAgentRoute } from "./agent-route.js";
 import { scrubCrossChannelAnswer } from "./answer-scrub.js";
-import { persistApprovedQA, appendCustomerDetail } from "./channel-memory.js";
+import { persistApprovedQA, appendCustomerDetail, resolveWorkspaceDirForAgent } from "./channel-memory.js";
 import type { ZoomConversationStore } from "./conversation-store.js";
 import { formatUnknownError } from "./errors.js";
 import type { ZoomMonitorLogger } from "./monitor-types.js";
@@ -12,6 +12,8 @@ import { getBlockedCallSet, getSessionBlockedTools, markToolsApproved, markSessi
 import { getPendingApproval, peekPendingApproval, storePendingApproval } from "./pending-approvals.js";
 import { getPendingShare } from "./pending-shares.js";
 import { consumeTrainingSession, storeTrainingSession } from "./pending-training.js";
+import { isLikelyClarifyingQuestion, selectTrainedAnswerCandidate } from "./trained-answer.js";
+import type { MemorySearchResultLike, TrainedAnswerCandidate } from "./trained-answer.js";
 import { createUploadToken } from "./upload-tokens.js";
 import { isZoomGroupAllowed, resolveZoomAllowlistMatch, resolveZoomObservePolicy, resolveZoomReplyPolicy, resolveZoomRouteConfig } from "./policy.js";
 import { shouldRespond, savePrefilterExample, isPrefilterEnabled } from "./prefilter.js";
@@ -25,6 +27,7 @@ import {
 import type { ZoomInboundThreadContext } from "./threading.js";
 import { rememberZoomSessionReplyRoot } from "./thread-state.js";
 import { getZoomRuntime } from "./runtime.js";
+import { getRecentlySentZoomMessageText, isRecentlySentZoomMessageId } from "./sent-message-ids.js";
 
 /** In-memory roleplay personas for observe mode testing. Key: `${channelJid}::${userJid}` */
 const roleplayPersonas = new Map<string, string>();
@@ -39,6 +42,7 @@ type PendingPrefilter = {
   channelName?: string;
   reviewChannelJid: string;
   threadContext?: ZoomInboundThreadContext;
+  threadStarterBody?: string;
   replyMainMessageId?: string;
   isThreadReply?: boolean;
   silent?: boolean;
@@ -148,10 +152,108 @@ function resolveAgentSpeakerName(cfg: OpenClawConfig, agentId?: string): string 
   return match?.name?.trim() || normalizedId;
 }
 
+async function resolveHighConfidenceTrainedAnswer(params: {
+  core: ReturnType<typeof getZoomRuntime>;
+  cfg: OpenClawConfig;
+  sessionKey: string;
+  query: string;
+  channelSlug: string;
+  allowAllCustomers: boolean;
+  excludeSlugs?: string[];
+  log: ZoomMonitorLogger;
+}): Promise<TrainedAnswerCandidate | undefined> {
+  const tool = params.core.tools.createMemorySearchTool({
+    config: params.cfg,
+    agentSessionKey: params.sessionKey,
+    channelSlug: params.channelSlug,
+    isSupport: true,
+    defaultScope: "channel",
+    allowAllCustomers: params.allowAllCustomers,
+    excludeSlugs: params.excludeSlugs,
+  });
+  if (!tool) {
+    return undefined;
+  }
+  try {
+    const result = await tool.execute("zoom-observe-trained-answer-prefetch", {
+      query: params.query,
+      scope: "channel",
+      maxResults: 4,
+    });
+    const details = (result as { details?: unknown }).details;
+    if (!details || typeof details !== "object") {
+      return undefined;
+    }
+    const rows = (details as { results?: unknown }).results;
+    if (!Array.isArray(rows)) {
+      return undefined;
+    }
+    const parsed: MemorySearchResultLike[] = rows.flatMap((row) => {
+      if (!row || typeof row !== "object") {
+        return [];
+      }
+      const raw = row as Record<string, unknown>;
+      return [
+        {
+          path: typeof raw.path === "string" ? raw.path : undefined,
+          score: typeof raw.score === "number" ? raw.score : undefined,
+          snippet: typeof raw.snippet === "string" ? raw.snippet : undefined,
+        },
+      ];
+    });
+    return selectTrainedAnswerCandidate({ query: params.query, results: parsed });
+  } catch (err) {
+    params.log.debug("observe mode: trained-answer prefetch failed", { error: String(err) });
+    return undefined;
+  }
+}
+
+function resolveParentSessionKeyForThread(params: {
+  runtime: ReturnType<typeof getZoomRuntime>;
+  cfg: OpenClawConfig;
+  senderId: string;
+  conversationId: string;
+  channelJid?: string;
+  isDirect: boolean;
+  threading: ReturnType<typeof resolveZoomThreadingConfig>;
+  threadContext?: ZoomInboundThreadContext;
+  log: ZoomMonitorLogger;
+  currentSessionKey?: string;
+}): string | undefined {
+  if (
+    params.isDirect ||
+    !params.threading.enabled ||
+    params.threading.sessionScope !== "thread" ||
+    params.threading.inheritParent === false ||
+    !params.threadContext?.threadId
+  ) {
+    return undefined;
+  }
+
+  const parentRoute = resolveZoomAgentRoute({
+    runtime: params.runtime,
+    cfg: params.cfg,
+    senderId: params.senderId,
+    conversationId: params.conversationId,
+    channelJid: params.channelJid,
+    isDirect: params.isDirect,
+    threading: { ...params.threading, sessionScope: "parent" },
+    threadContext: params.threadContext,
+    log: params.log,
+  });
+
+  const parentSessionKey = parentRoute.sessionKey?.trim();
+  if (!parentSessionKey || parentSessionKey === params.currentSessionKey?.trim()) {
+    return undefined;
+  }
+  return parentSessionKey;
+}
+
 export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
   const { cfg, runtime, creds, textLimit, conversationStore, log } = deps;
   const zoomCfg = cfg.channels?.zoom as ZoomConfig | undefined;
   const core = getZoomRuntime();
+  const resolveMemoryWorkspaceDir = (agentId?: string) => resolveWorkspaceDirForAgent(cfg, agentId);
 
   return async (event: ZoomWebhookEvent) => {
     const eventType = event.event;
@@ -565,6 +667,22 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
       const refId = value.slice("approve_answer:".length);
       const pending = getPendingApproval(refId);
       const { sendZoomTextMessage } = await import("./send.js");
+      const sendReviewStatus = async (text: string) => {
+        if (!reviewChannelJid) return;
+        try {
+          await sendZoomTextMessage({
+            cfg,
+            to: reviewChannelJid,
+            text,
+            isChannel: true,
+          });
+        } catch (err) {
+          log.warn("failed to send review-channel approval status", {
+            reviewChannelJid,
+            error: formatUnknownError(err),
+          });
+        }
+      };
       if (!pending) {
         log.debug("pending approval not found or expired", { refId });
         await sendZoomTextMessage({
@@ -576,29 +694,40 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
         return;
       }
 
-      // Immediate feedback in review channel
-      if (reviewChannelJid) {
-        await sendZoomTextMessage({
-          cfg,
-          to: reviewChannelJid,
-          text: `Approved — posting answer to ${pending.originalChannelName} now.`,
-          isChannel: true,
-        });
-      }
-
       // Post the approved answer to the original channel (skip in silent mode)
       if (!pending.silent) {
         const firstName = pending.originalSenderName.split(/[@\s.]/)[0];
         const displayName = firstName.charAt(0).toUpperCase() + firstName.slice(1).toLowerCase();
         const speakerName = resolveAgentSpeakerName(cfg, pending.agentId);
-        await sendZoomTextMessage({
-          cfg,
-          to: pending.originalChannelJid,
-          text: `@${displayName} ${pending.proposedAnswer}`,
-          isChannel: true,
-          replyToMessageId: pending.replyMainMessageId,
-          speakerName,
-        });
+        try {
+          await sendZoomTextMessage({
+            cfg,
+            to: pending.originalChannelJid,
+            text: `@${displayName} ${pending.proposedAnswer}`,
+            isChannel: true,
+            replyToMessageId: pending.replyMainMessageId,
+            speakerName,
+          });
+          await sendReviewStatus(`Approved — posted answer to ${pending.originalChannelName}.`);
+        } catch (err) {
+          const reason = formatUnknownError(err);
+          log.error("failed to post approved answer to original channel", {
+            refId,
+            channel: pending.originalChannelName,
+            channelJid: pending.originalChannelJid,
+            error: reason,
+          });
+          await sendReviewStatus(`Approved, but failed to post to ${pending.originalChannelName}: ${reason}`);
+          await sendZoomTextMessage({
+            cfg,
+            to: userJid,
+            text: `Approval received, but posting to ${pending.originalChannelName} failed: ${reason}`,
+            isChannel: false,
+          });
+          return;
+        }
+      } else {
+        await sendReviewStatus(`Approved — silent mode enabled for ${pending.originalChannelName} (not posted to channel).`);
       }
 
       // Persist Q&A + customer context to channel memory
@@ -609,6 +738,7 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
           senderName: pending.originalSenderName,
           question: pending.originalQuestion,
           answer: pending.proposedAnswer,
+          workspaceDir: resolveMemoryWorkspaceDir(pending.agentId),
         });
         // Extract customer environment details and add to profile
         const details = extractCustomerDetails(pending.originalQuestion, pending.proposedAnswer);
@@ -617,6 +747,7 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
             channelName: pending.originalChannelName,
             channelJid: pending.originalChannelJid,
             detail,
+            workspaceDir: resolveMemoryWorkspaceDir(pending.agentId),
           });
         }
       } catch (err) {
@@ -783,6 +914,7 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
               senderName: blockedSet.senderName,
               question: blockedSet.question,
               answer: execResult,
+              workspaceDir: resolveMemoryWorkspaceDir(blockedSet.agentId ?? route.agentId),
             });
           } catch (err) {
             log.error("failed to persist tool action Q&A to memory", { err });
@@ -980,6 +1112,7 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
               senderName: pending.originalSenderName,
               question: pending.originalQuestion,
               answer: execResult,
+              workspaceDir: resolveMemoryWorkspaceDir(pending.agentId ?? route.agentId),
             });
           } catch (err) {
             log.error("failed to persist action Q&A to memory", { err });
@@ -1156,6 +1289,9 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
       messageId,
       replyMainMessageId,
     });
+    const threadStarterBody = threadContext.parentMessageId
+      ? getRecentlySentZoomMessageText(threadContext.parentMessageId)
+      : undefined;
 
     if (!channelJid || !senderId || !messageText) {
       log.debug("channel message missing required fields", {
@@ -1163,6 +1299,11 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
         hasSender: Boolean(senderId),
         hasMessage: Boolean(messageText),
       });
+      return;
+    }
+
+    if (isRecentlySentZoomMessageId(messageId)) {
+      log.debug("ignoring echoed outbound message", { channelJid, messageId });
       return;
     }
 
@@ -1276,6 +1417,7 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
         channelName,
         reviewChannelJid,
         threadContext,
+        threadStarterBody,
         isThreadReply: threadContext.isThreadReply,
         silent: observeChannelMode === "silent",
         mode: observeChannelMode,
@@ -1336,6 +1478,7 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
       channelJid,
       channelName,
       threadContext,
+      threadStarterBody,
     });
   }
 
@@ -1372,7 +1515,18 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
 
     // Fire-and-forget: pull history and build training prompt
     const { fetchAndTrainFromHistory } = await import("./history.js");
-    fetchAndTrainFromHistory(channelJid, channelName, creds, log).catch((err) =>
+    const historyRoute = resolveZoomAgentRoute({
+      runtime: core,
+      cfg,
+      senderId: "system",
+      conversationId: channelJid,
+      channelJid,
+      isDirect: false,
+      log,
+    });
+    fetchAndTrainFromHistory(channelJid, channelName, creds, log, {
+      workspaceDir: resolveMemoryWorkspaceDir(historyRoute.agentId),
+    }).catch((err) =>
       log.error(`history ingest failed for ${channelName ?? channelJid}: ${err}`),
     );
   }
@@ -1387,6 +1541,7 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
     channelJid?: string;
     channelName?: string;
     threadContext?: ZoomInboundThreadContext;
+    threadStarterBody?: string;
   }) {
     // For DMs, add context prefix so the agent knows this is NOT a customer support conversation
     if (params.isDirect) {
@@ -1565,6 +1720,7 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
     channelName?: string;
     reviewChannelJid: string;
     threadContext?: ZoomInboundThreadContext;
+    threadStarterBody?: string;
     replyMainMessageId?: string;
     isThreadReply?: boolean;
     silent?: boolean;
@@ -1581,6 +1737,7 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
       channelName,
       reviewChannelJid,
       threadContext,
+      threadStarterBody,
       replyMainMessageId: explicitReplyMainMessageId,
       isThreadReply,
       silent,
@@ -1618,6 +1775,7 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
             conversationId, senderId, senderName, text,
             channelJid, channelName, reviewChannelJid,
             threadContext,
+            threadStarterBody,
             replyMainMessageId,
             isThreadReply, silent, mode, roleplay,
           });
@@ -1668,6 +1826,23 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
         threadContext,
         log,
       });
+      const parentSessionKey = resolveParentSessionKeyForThread({
+        runtime: core,
+        cfg,
+        senderId,
+        conversationId,
+        channelJid,
+        isDirect: false,
+        threading,
+        threadContext,
+        log,
+        currentSessionKey: route.sessionKey,
+      });
+      rememberZoomSessionReplyRoot({
+        sessionKey: route.sessionKey,
+        threadContext,
+        explicitReplyMainMessageId: replyMainMessageId,
+      });
 
       // Register this session as observe-mode so the tool gate hook can block writes
       markSessionObserve(route.sessionKey, {
@@ -1687,7 +1862,6 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
       // Channel context hint for memory_search — tells agent which customer dir to search
       const customerSlug = (channelName ?? channelJid.split("@")[0])
         .toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-      const memoryHint = `IMPORTANT: BEFORE answering, call memory_search with the user's question to find trained answers and customer context in memory/customers/${customerSlug}/. Trained answers from reviewers are highest priority — use them over your own knowledge.`;
 
       // Scope context for deterministic memory_search scoping
       const crossTraining = await getCrossChannelTraining(channelJid);
@@ -1697,6 +1871,38 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
         ? [customerSlug, "test-customer", "zoomwarriors-support-channel"].filter(Boolean)
         : undefined;
       log.debug("observe scope context", { customerSlug, allowAllCustomers, excludeSlugs, redactionPolicy: crossTraining.redactionPolicy });
+      const trainedAnswerCandidate = await resolveHighConfidenceTrainedAnswer({
+        core,
+        cfg,
+        sessionKey: route.sessionKey,
+        query: text,
+        channelSlug: customerSlug,
+        allowAllCustomers,
+        excludeSlugs,
+        log,
+      });
+      if (trainedAnswerCandidate) {
+        log.info("observe mode: high-confidence trained answer candidate", {
+          channelJid,
+          path: trainedAnswerCandidate.path,
+          score: trainedAnswerCandidate.score,
+          similarity: trainedAnswerCandidate.similarity,
+        });
+      }
+      const memoryHintLines = [
+        `IMPORTANT: BEFORE answering, call memory_search with the user's question to find trained answers and customer context in memory/customers/${customerSlug}/. Trained answers from reviewers are highest priority — use them over your own knowledge.`,
+        "When calling memory_search, use the user's exact message text verbatim as the query. Do NOT paraphrase into keywords.",
+        "If memory_search returns a trained Q/A match, use the trained answer text instead of a generic clarifying question.",
+      ];
+      if (trainedAnswerCandidate) {
+        memoryHintLines.push(
+          "High-confidence trained Q/A match (prefetched from exact user text):",
+          `Matched Q: ${trainedAnswerCandidate.question}`,
+          `Required A: ${trainedAnswerCandidate.answer}`,
+          "Unless the user adds contradictory details, use Required A verbatim.",
+        );
+      }
+      const memoryHint = memoryHintLines.join("\n");
 
       // Thread replies are follow-ups to the bot's clarifying question — don't filter them.
       // New top-level messages get the observe wrapper to triage questions vs casual chat.
@@ -1715,9 +1921,13 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
         : isThreadReply
         ? [
             "[CHANNEL OBSERVE — FOLLOW-UP] The user replied to your clarifying question.",
+            threadStarterBody
+              ? `Previous bot message in this thread: ${threadStarterBody}`
+              : "Previous bot message text was unavailable.",
             memoryHint,
             "Also call the relevant ZW2 tools to fetch fresh data when the question involves orders, pricing, or SOW.",
-            "If a write tool is blocked, do NOT retry it and do NOT mention 'pending approval' in your response. Just respond with [NO_RESPONSE].",
+            "If a write tool is blocked, briefly say you cannot complete that action right now.",
+            "ALWAYS respond to this follow-up and interpret it in context of the previous bot message. NEVER output [NO_RESPONSE] or NO_REPLY.",
             "Give a short, direct answer with the actual data. No filler, no preamble like 'let me look that up'. Just the facts in 2-4 sentences, conversational tone.",
             `User reply: ${text}`,
           ].join("\n")
@@ -1749,6 +1959,7 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
         From: `zoom:channel:${channelJid}`,
         To: conversationId,
         SessionKey: route.sessionKey,
+        ParentSessionKey: parentSessionKey,
         AccountId: route.accountId,
         ChatType: "channel",
         ConversationLabel: senderName ?? senderId,
@@ -1762,6 +1973,7 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
         CommandSource: "text" as const,
         OriginatingChannel: "zoom" as const,
         OriginatingTo: conversationId,
+        ThreadStarterBody: threadStarterBody,
         // Scoped memory search context
         ChannelSlug: customerSlug,
         IsSupport: true,
@@ -1863,6 +2075,7 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
           conversationId, senderId, senderName, text,
           channelJid, channelName, reviewChannelJid,
           threadContext,
+          threadStarterBody,
           replyMainMessageId,
           isThreadReply, silent, mode, roleplay,
         });
@@ -1905,6 +2118,7 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
               channelName,
               channelJid,
               detail,
+              workspaceDir: resolveMemoryWorkspaceDir(route.agentId),
             });
             persisted.push(detail);
           } catch (err) {
@@ -1930,6 +2144,18 @@ export function createZoomMessageHandler(deps: ZoomMessageHandlerDeps) {
         .replace(/\[TOOLS_USED\]\s*.*/i, "")
         .replace(/\[PROPOSED_ACTION\][\s\S]*/i, "")
         .trim();
+
+      // Deterministic guardrail: if we have a high-confidence trained answer match
+      // and the model produced a generic clarification question, prefer the trained answer.
+      if (trainedAnswerCandidate && isLikelyClarifyingQuestion(cleanReply)) {
+        log.info("observe mode: replacing clarifying reply with trained answer", {
+          channelJid,
+          path: trainedAnswerCandidate.path,
+          score: trainedAnswerCandidate.score,
+          similarity: trainedAnswerCandidate.similarity,
+        });
+        cleanReply = trainedAnswerCandidate.answer;
+      }
 
       // Optional cross-channel answer redaction
       if (cleanReply && allowAllCustomers && crossTraining.redactionPolicy === "llm") {
@@ -2052,6 +2278,7 @@ export async function routeMessageToAgent(params: {
   channelJid?: string;
   channelName?: string;
   threadContext?: ZoomInboundThreadContext;
+  threadStarterBody?: string;
   replyToMessageId?: string;
   sessionKeyOverride?: string;
   agentIdOverride?: string;
@@ -2067,6 +2294,7 @@ export async function routeMessageToAgent(params: {
     channelJid,
     channelName,
     threadContext,
+    threadStarterBody,
     replyToMessageId,
     sessionKeyOverride,
     agentIdOverride,
@@ -2099,6 +2327,18 @@ export async function routeMessageToAgent(params: {
     const resolvedAgentId = agentIdOverride?.trim() || route.agentId;
     const resolvedAccountId = accountIdOverride?.trim() || route.accountId;
     const resolvedSessionKey = sessionKeyOverride?.trim() || route.sessionKey;
+    const parentSessionKey = resolveParentSessionKeyForThread({
+      runtime: core,
+      cfg,
+      senderId,
+      conversationId,
+      channelJid,
+      isDirect,
+      threading,
+      threadContext,
+      log,
+      currentSessionKey: resolvedSessionKey,
+    });
     const resolvedReplyToMessageId = resolveZoomReplyMainMessageId({
       threading,
       threadContext,
@@ -2118,6 +2358,7 @@ export async function routeMessageToAgent(params: {
       From: isDirect ? `zoom:${senderId}` : `zoom:channel:${channelJid}`,
       To: conversationId,
       SessionKey: resolvedSessionKey,
+      ParentSessionKey: parentSessionKey,
       AccountId: resolvedAccountId,
       ChatType: isDirect ? "direct" : "channel",
       ConversationLabel: senderName ?? senderId,
@@ -2131,6 +2372,7 @@ export async function routeMessageToAgent(params: {
       CommandSource: "text" as const,
       OriginatingChannel: "zoom" as const,
       OriginatingTo: conversationId,
+      ThreadStarterBody: threadStarterBody,
       // Preserve the provider message id so plugin hooks (e.g. pulsebot comfort replies)
       // can reliably thread follow-up messages to the triggering inbound message.
       MessageSid: threadContext?.incomingMessageId,
