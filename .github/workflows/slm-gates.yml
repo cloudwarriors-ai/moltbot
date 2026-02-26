@@ -78,6 +78,13 @@ jobs:
         with:
           bun-version: latest
 
+      - name: Initialize SLM smoke artifact
+        if: steps.changes.outputs.slm == 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          printf '{"ok":false,"stage":"unknown","error":"slm-gates did not reach smoke"}\n' > artifacts/slm-smoke-summary.json
+
       - name: Install dependencies
         if: steps.changes.outputs.slm == 'true'
         env:
