@@ -1,0 +1,337 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SLM Control Dashboard</title>
+    <link rel="stylesheet" href="/app.css" />
+  </head>
+  <body>
+    <div class="bg-layer"></div>
+    <main class="shell">
+      <header class="hero">
+        <p class="eyebrow">OpenClaw SLM Control Plane</p>
+        <h1>SLM Dashboard</h1>
+        <p class="subtitle">API-first Q&amp;A library, dynamic taxonomy, and operator training studio.</p>
+      </header>
+
+      <section id="login-panel" class="card">
+        <h2>Login</h2>
+        <form id="login-form" class="form-grid">
+          <label>
+            Username
+            <input id="login-username" name="username" type="text" required autocomplete="username" />
+          </label>
+          <label>
+            Password
+            <input id="login-password" name="password" type="password" required autocomplete="current-password" />
+          </label>
+          <button type="submit">Sign In</button>
+        </form>
+        <p id="login-error" class="error"></p>
+      </section>
+
+      <section id="dashboard-panel" class="stack hidden">
+        <div class="card status">
+          <div>
+            <h2>Operator Session</h2>
+            <p id="me-line" class="muted"></p>
+          </div>
+          <button id="logout-button" class="button-secondary">Log Out</button>
+        </div>
+
+        <section class="card">
+          <div class="section-head">
+            <h2>Q&amp;A Library</h2>
+            <div class="inline-controls">
+              <button id="qa-refresh">Refresh</button>
+            </div>
+          </div>
+          <div class="filter-grid">
+            <label>
+              Provider
+              <select id="filter-provider"></select>
+            </label>
+            <label>
+              Channel
+              <select id="filter-channel"></select>
+            </label>
+            <label>
+              Category
+              <select id="filter-category"></select>
+            </label>
+            <label>
+              Status
+              <select id="filter-status">
+                <option value="">All</option>
+                <option value="validated" selected>validated</option>
+                <option value="draft">draft</option>
+                <option value="archived">archived</option>
+              </select>
+            </label>
+            <label class="grow-2">
+              Search
+              <input id="qa-query" type="text" placeholder="Search question or answer..." />
+            </label>
+          </div>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Updated</th>
+                  <th>Provider</th>
+                  <th>Channel</th>
+                  <th>Category</th>
+                  <th>Status</th>
+                  <th>Question</th>
+                  <th>Answer</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody id="qa-table-body"></tbody>
+            </table>
+          </div>
+          <p id="qa-empty" class="muted hidden">No records found for this tenant.</p>
+        </section>
+
+        <section class="card factory-only" id="factory-lane">
+          <h2>Category Manager</h2>
+          <div class="split-grid">
+            <form id="category-create-form" class="form-grid compact-card">
+              <h3>Create Category</h3>
+              <label>
+                Provider Key
+                <input id="category-create-provider" type="text" placeholder="zoom" required />
+              </label>
+              <label>
+                Channel Key
+                <input id="category-create-channel" type="text" placeholder="phone" required />
+              </label>
+              <label>
+                Category Key
+                <input id="category-create-key" type="text" placeholder="billing" required />
+              </label>
+              <label>
+                Display Name
+                <input id="category-create-name" type="text" placeholder="Billing" required />
+              </label>
+              <label>
+                Sort Order
+                <input id="category-create-order" type="number" min="0" value="1000" />
+              </label>
+              <button type="submit">Create Category</button>
+            </form>
+
+            <form id="category-update-form" class="form-grid compact-card">
+              <h3>Update Category</h3>
+              <label>
+                Category
+                <select id="category-update-id"></select>
+              </label>
+              <label>
+                Display Name
+                <input id="category-update-name" type="text" placeholder="New display name" />
+              </label>
+              <label>
+                Active
+                <select id="category-update-active">
+                  <option value="">No change</option>
+                  <option value="true">Active</option>
+                  <option value="false">Inactive</option>
+                </select>
+              </label>
+              <label>
+                Sort Order
+                <input id="category-update-order" type="number" min="0" placeholder="No change" />
+              </label>
+              <button type="submit">Update Category</button>
+            </form>
+          </div>
+          <p id="category-status" class="muted"></p>
+        </section>
+
+        <section class="card factory-only">
+          <h2>Q&amp;A Create/Edit</h2>
+          <div class="split-grid">
+            <form id="qa-create-form" class="form-grid compact-card">
+              <h3>Create Q&amp;A</h3>
+              <label>
+                Provider
+                <input id="qa-create-provider" type="text" placeholder="zoom" required />
+              </label>
+              <label>
+                Channel
+                <input id="qa-create-channel" type="text" placeholder="support" required />
+              </label>
+              <label>
+                Category
+                <select id="qa-create-category" required></select>
+              </label>
+              <label>
+                Status
+                <select id="qa-create-status">
+                  <option value="draft">draft</option>
+                  <option value="validated" selected>validated</option>
+                  <option value="archived">archived</option>
+                </select>
+              </label>
+              <label>
+                Question
+                <textarea id="qa-create-question" required></textarea>
+              </label>
+              <label>
+                Answer
+                <textarea id="qa-create-answer" required></textarea>
+              </label>
+              <button type="submit">Create Q&amp;A</button>
+            </form>
+
+            <form id="qa-update-form" class="form-grid compact-card">
+              <h3>Update Selected Q&amp;A</h3>
+              <label>
+                Projection ID
+                <input id="qa-projection-id" type="text" readonly />
+              </label>
+              <label>
+                Provider
+                <input id="qa-edit-provider" type="text" placeholder="zoom" />
+              </label>
+              <label>
+                Channel
+                <input id="qa-edit-channel" type="text" placeholder="support" />
+              </label>
+              <label>
+                Category
+                <select id="qa-edit-category"></select>
+              </label>
+              <label>
+                Status
+                <select id="qa-edit-status">
+                  <option value="">No change</option>
+                  <option value="draft">draft</option>
+                  <option value="validated">validated</option>
+                  <option value="archived">archived</option>
+                </select>
+              </label>
+              <label>
+                Question
+                <textarea id="qa-question"></textarea>
+              </label>
+              <label>
+                Answer
+                <textarea id="qa-answer"></textarea>
+              </label>
+              <button type="submit">Update Q&amp;A</button>
+            </form>
+          </div>
+          <p id="qa-update-status" class="muted"></p>
+        </section>
+
+        <section class="card">
+          <h2>Training Studio</h2>
+          <form id="session-start-form" class="form-grid">
+            <label>
+              Session Question
+              <textarea id="session-question" required></textarea>
+            </label>
+            <button type="submit">Start Session</button>
+          </form>
+          <form id="session-turn-form" class="form-grid">
+            <label>
+              User Prompt
+              <textarea id="session-prompt" required></textarea>
+            </label>
+            <label>
+              Edited Answer (optional)
+              <textarea id="session-edited-answer"></textarea>
+            </label>
+            <button type="submit">Run Turn</button>
+          </form>
+          <div class="inline-controls">
+            <button id="session-finish" type="button" class="button-secondary">Finish Session</button>
+            <span id="session-id" class="muted">No active session</span>
+          </div>
+          <pre id="session-output" class="json-box"></pre>
+
+          <form id="session-save-form" class="form-grid factory-only compact-card">
+            <h3>Save Correction To Library</h3>
+            <label>
+              Provider
+              <input id="session-save-provider" type="text" placeholder="zoom" required />
+            </label>
+            <label>
+              Channel
+              <input id="session-save-channel" type="text" placeholder="support" required />
+            </label>
+            <label>
+              Category
+              <select id="session-save-category" required></select>
+            </label>
+            <label>
+              Status
+              <select id="session-save-status-select">
+                <option value="validated" selected>validated</option>
+                <option value="draft">draft</option>
+                <option value="archived">archived</option>
+              </select>
+            </label>
+            <button type="submit">Save To Library</button>
+          </form>
+          <p id="session-save-result" class="muted"></p>
+        </section>
+
+        <section class="card factory-only">
+          <h2>Training Queue</h2>
+          <form id="training-form" class="form-grid">
+            <label>
+              Base Model
+              <input id="training-base-model" type="text" value="forge/slm-base" required />
+            </label>
+            <label>
+              Source
+              <select id="training-source">
+                <option value="library" selected>library</option>
+                <option value="zoom">zoom</option>
+              </select>
+            </label>
+            <label>
+              Provider Filter
+              <input id="training-provider" type="text" placeholder="zoom" />
+            </label>
+            <label>
+              Channel Filter
+              <input id="training-channel" type="text" placeholder="support" />
+            </label>
+            <label>
+              Category Filter
+              <select id="training-category"></select>
+            </label>
+            <label>
+              Status Filter
+              <select id="training-status">
+                <option value="validated" selected>validated</option>
+                <option value="draft">draft</option>
+                <option value="archived">archived</option>
+                <option value="">none</option>
+              </select>
+            </label>
+            <label>
+              Split Seed
+              <input id="training-split-seed" type="number" min="1" value="7" />
+            </label>
+            <button type="submit">Enqueue Training</button>
+          </form>
+          <pre id="training-output" class="json-box"></pre>
+        </section>
+
+        <section class="card">
+          <h2>Data In / Data Out</h2>
+          <p class="muted">Every API call from this dashboard is captured here for traceability.</p>
+          <div id="trace-list" class="trace-list"></div>
+        </section>
+      </section>
+    </main>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
