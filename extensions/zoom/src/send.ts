@@ -27,6 +27,8 @@ export type SendZoomMessageParams = {
   replyToMessageId?: string;
   /** Optional speaker label used in card heading (e.g., "PulseBot says:"). */
   speakerName?: string;
+  /** Optional strict recipient safety guard for DM sends. */
+  enforceRecipientSafety?: boolean;
 };
 
 export type SendZoomMessageResult = {
@@ -37,9 +39,178 @@ export type SendZoomMessageResult = {
 /** Zoom Team Chat message limit */
 const ZOOM_TEXT_CHUNK_LIMIT = 4000;
 const XMPP_USER_JID_RE = /@xmpp\.zoom\.us$/i;
+const WEBHOOK_TIMEOUT_MS = 5000;
+
+type ZoomReplyWebhookPayload = {
+  event: "bot.reply";
+  payload: {
+    channel_id: string;
+    message: string;
+    message_id: string;
+    is_channel: boolean;
+    speaker?: string;
+  };
+};
+
+export function resolveZoomReplyWebhookUrl(env: NodeJS.ProcessEnv = process.env): string | null {
+  const explicit = env.ZOOM_REPLY_WEBHOOK_URL?.trim();
+  if (explicit && explicit.startsWith("http")) return explicit;
+  const fallback = env.BOT_REPLY_WEBHOOK_URL?.trim();
+  if (fallback && fallback.startsWith("http")) return fallback;
+  return null;
+}
+
+export function buildZoomReplyWebhookPayload(params: {
+  channelId: string;
+  message: string;
+  messageId: string;
+  isChannel: boolean;
+  speakerName?: string;
+}): ZoomReplyWebhookPayload {
+  const speaker = params.speakerName?.trim();
+  return {
+    event: "bot.reply",
+    payload: {
+      channel_id: params.channelId,
+      message: params.message,
+      message_id: params.messageId,
+      is_channel: params.isChannel,
+      ...(speaker ? { speaker } : {}),
+    },
+  };
+}
+
+export function buildZoomActionMirrorText(params: {
+  headText?: string;
+  body: ZoomBodyItem[];
+}): string {
+  const parts: string[] = [];
+  const head = params.headText?.trim();
+  if (head) {
+    parts.push(head);
+  }
+  for (const item of params.body) {
+    if (item.type === "message") {
+      const text = item.text.trim();
+      if (text) parts.push(text);
+      continue;
+    }
+    const labels = item.items.map((entry) => entry.text.trim()).filter(Boolean);
+    if (labels.length > 0) {
+      parts.push(`Actions: ${labels.join(" | ")}`);
+    }
+  }
+  return parts.join("\n\n").slice(0, ZOOM_TEXT_CHUNK_LIMIT);
+}
+
+async function mirrorZoomReplyToWebhook(params: {
+  log: { warn: (message: string, data?: Record<string, unknown>) => void };
+  to: string;
+  message: string;
+  messageId: string;
+  isChannel: boolean;
+  speakerName?: string;
+}): Promise<void> {
+  const webhookUrl = resolveZoomReplyWebhookUrl();
+  if (!webhookUrl) return;
+
+  const payload = buildZoomReplyWebhookPayload({
+    channelId: params.to,
+    message: params.message,
+    messageId: params.messageId,
+    isChannel: params.isChannel,
+    speakerName: params.speakerName,
+  });
+
+  try {
+    const response = await fetch(webhookUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(WEBHOOK_TIMEOUT_MS),
+    });
+    if (!response.ok) {
+      const body = await response.text();
+      params.log.warn("zoom reply webhook mirror failed", {
+        status: response.status,
+        body: body.slice(0, 300),
+      });
+    }
+  } catch (err) {
+    params.log.warn("zoom reply webhook mirror error", {
+      error: formatUnknownError(err),
+    });
+  }
+}
 
 function normalizeLookupToken(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function collectRecipientIdentityTokens(reference: {
+  userJid?: string;
+  userName?: string;
+  userEmail?: string;
+}): Set<string> {
+  const tokens = new Set<string>();
+  const push = (value?: string) => {
+    const normalized = normalizeLookupToken(value ?? "");
+    if (normalized) tokens.add(normalized);
+  };
+
+  push(reference.userJid);
+  push(reference.userName);
+
+  const userName = reference.userName?.trim() ?? "";
+  if (userName) {
+    for (const part of userName.split(/\s+/g)) push(part);
+  }
+
+  const email = reference.userEmail?.trim().toLowerCase() ?? "";
+  if (email) {
+    push(email);
+    const local = email.split("@")[0] ?? "";
+    push(local);
+    for (const part of local.split(/[._-]+/g)) push(part);
+  }
+
+  return tokens;
+}
+
+function extractLeadingSalutationTarget(message: string): string | undefined {
+  // Catch direct-address opens like "Hey Tyler", "Hi Doug,", "Hello Chad —".
+  const match = message.match(/^\s*(?:hey|hi|hello)\s+([a-z][a-z0-9._-]*)\b/i);
+  const raw = match?.[1]?.trim();
+  if (!raw) return undefined;
+  const normalized = normalizeLookupToken(raw);
+  return normalized || undefined;
+}
+
+export function resolveZoomDmRecipientSafetyViolation(params: {
+  recipient: string;
+  message: string;
+  reference: {
+    userJid?: string;
+    userName?: string;
+    userEmail?: string;
+  } | null;
+}): string | null {
+  const recipient = params.recipient.trim();
+  if (!recipient || !XMPP_USER_JID_RE.test(recipient)) return null;
+
+  const salutationTarget = extractLeadingSalutationTarget(params.message);
+  if (!salutationTarget) return null;
+
+  const reference = params.reference;
+  if (!reference || (!reference.userName?.trim() && !reference.userEmail?.trim())) {
+    return "unable to verify recipient identity for JID target; use email/name or run zoom_lookup_user first";
+  }
+
+  const identityTokens = collectRecipientIdentityTokens(reference);
+  if (identityTokens.has(salutationTarget)) return null;
+
+  const recipientLabel = reference.userName?.trim() || reference.userEmail?.trim() || recipient;
+  return `recipient mismatch: message greets "${salutationTarget}" but target resolves to "${recipientLabel}"`;
 }
 
 export function resolveDmRecipientFromKnownConversations(
@@ -208,6 +379,22 @@ export async function sendZoomTextMessage(
     }
   }
   const storedRef = await conversationStore.get(to);
+  if (!isChannel && params.enforceRecipientSafety) {
+    const safetyViolation = resolveZoomDmRecipientSafetyViolation({
+      recipient: to,
+      message: text,
+      reference: storedRef
+        ? {
+            userJid: storedRef.userJid,
+            userName: storedRef.userName,
+            userEmail: storedRef.userEmail,
+          }
+        : null,
+    });
+    if (safetyViolation) {
+      throw new Error(`zoom send blocked: ${safetyViolation}`);
+    }
+  }
   const accountId = storedRef?.accountId ?? creds.accountId;
 
   log.debug(
@@ -258,10 +445,19 @@ export async function sendZoomTextMessage(
     }
 
     const messageId = result.data?.message_id ?? "unknown";
+    const outboundText = cleanText.slice(0, ZOOM_TEXT_CHUNK_LIMIT);
     rememberZoomSentMessageId(messageId);
-    rememberZoomSentMessageText(messageId, cleanText.slice(0, ZOOM_TEXT_CHUNK_LIMIT));
+    rememberZoomSentMessageText(messageId, outboundText);
 
     log.info("sent message", { to, messageId });
+    await mirrorZoomReplyToWebhook({
+      log,
+      to,
+      message: outboundText,
+      messageId,
+      isChannel: Boolean(isChannel),
+      speakerName: resolvedSpeakerName,
+    });
 
     return {
       messageId,
@@ -290,6 +486,7 @@ export async function sendZoomActionMessage(params: {
   speakerName?: string;
   body: ZoomBodyItem[];
   isChannel?: boolean;
+  enforceRecipientSafety?: boolean;
 }): Promise<SendZoomMessageResult> {
   const { cfg, headText, body, isChannel } = params;
   const zoomCfg = cfg.channels?.zoom as ZoomConfig | undefined;
@@ -317,6 +514,23 @@ export async function sendZoomActionMessage(params: {
     }
   }
   const storedRef = await conversationStore.get(to);
+  if (!isChannel && params.enforceRecipientSafety) {
+    const firstMessage = body.find((item) => item.type === "message");
+    const safetyViolation = resolveZoomDmRecipientSafetyViolation({
+      recipient: to,
+      message: firstMessage?.text ?? "",
+      reference: storedRef
+        ? {
+            userJid: storedRef.userJid,
+            userName: storedRef.userName,
+            userEmail: storedRef.userEmail,
+          }
+        : null,
+    });
+    if (safetyViolation) {
+      throw new Error(`zoom send blocked: ${safetyViolation}`);
+    }
+  }
   const accountId = storedRef?.accountId ?? creds.accountId;
   const resolvedSpeakerName = resolveSpeakerNameForSend({
     cfg,
@@ -371,6 +585,20 @@ export async function sendZoomActionMessage(params: {
 
     const messageId = result.data?.message_id ?? "unknown";
     rememberZoomSentMessageId(messageId);
+    const mirroredText = buildZoomActionMirrorText({
+      headText: content.head.text,
+      body,
+    });
+    if (mirroredText) {
+      await mirrorZoomReplyToWebhook({
+        log,
+        to,
+        message: mirroredText,
+        messageId,
+        isChannel: Boolean(isChannel),
+        speakerName: resolvedSpeakerName,
+      });
+    }
     log.info("sent action message", { to, messageId });
     return { messageId, conversationId: to };
   } catch (err) {
